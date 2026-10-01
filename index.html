@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Склад и Касса АТОЛ</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; color: #333; }
+        .container { display: flex; gap: 20px; flex-wrap: wrap; }
+        .panel { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; min-width: 300px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #005FF9; color: white; }
+        input, select, button { padding: 10px; margin: 5px 0; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background-color: #28a745; color: white; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #218838; }
+        .sell-btn { background-color: #005FF9; }
+        .sell-btn:hover { background-color: #0044cc; }
+    </style>
+</head>
+<body>
+
+    <h1>Управление складом</h1>
+
+    <div class="container">
+        <!-- Блок добавления товара -->
+        <div class="panel">
+            <h2>Добавить товар</h2>
+            <form id="add-form">
+                <input type="text" id="add-code" placeholder="Артикул (штрихкод)" required>
+                <input type="text" id="add-name" placeholder="Название товара" required>
+                <input type="text" id="add-category" placeholder="Категория" required>
+                <input type="number" id="add-stock" placeholder="Количество на склад" required>
+                <input type="number" step="0.01" id="add-price" placeholder="Цена за 1 шт." required>
+                <button type="submit">Добавить на склад</button>
+            </form>
+        </div>
+
+        <!-- Блок продажи -->
+        <div class="panel">
+            <h2>Продать (Пробить чек)</h2>
+            <form id="sell-form">
+                <input type="text" id="sell-code" placeholder="Артикул товара" required>
+                <input type="number" id="sell-quantity" placeholder="Количество для продажи" required>
+                <select id="sell-payment">
+                    <option value="cash">Наличные</option>
+                    <option value="electronically">Банковская карта</option>
+                </select>
+                <button type="submit" class="sell-btn">Пробить чек на АТОЛ</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Таблица остатков -->
+    <div class="panel" style="margin-top: 20px;">
+        <h2>Остатки на складе</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Артикул</th>
+                    <th>Название</th>
+                    <th>Категория</th>
+                    <th>Остаток</th>
+                    <th>Цена</th>
+                </tr>
+            </thead>
+            <tbody id="product-list">
+                <!-- Сюда будут загружаться товары -->
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        // Здесь мы указываем адрес, куда фронтенд будет отправлять запросы. 
+        // Пока оставим пустой строкой, чтобы запросы шли на тот же сервер.
+        const API_URL = ''; 
+
+        // Функция загрузки товаров с сервера
+        async function loadProducts() {
+            try {
+                const response = await fetch(`${API_URL}/api/products`);
+                const products = await response.json();
+                const tbody = document.getElementById('product-list');
+                tbody.innerHTML = '';
+                
+                products.forEach(p => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${p.code}</td>
+                        <td>${p.name}</td>
+                        <td>${p.category}</td>
+                        <td><b>${p.stock}</b></td>
+                        <td>${p.price} ₽</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (error) {
+                console.error("Ошибка загрузки", error);
+            }
+        }
+
+        // Обработка формы добавления товара
+        document.getElementById('add-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const product = {
+                code: document.getElementById('add-code').value,
+                name: document.getElementById('add-name').value,
+                category: document.getElementById('add-category').value,
+                stock: parseInt(document.getElementById('add-stock').value),
+                price: parseFloat(document.getElementById('add-price').value)
+            };
+
+            const response = await fetch(`${API_URL}/api/products`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(product)
+            });
+
+            if (response.ok) {
+                alert('Товар успешно добавлен!');
+                e.target.reset();
+                loadProducts();
+            } else {
+                const err = await response.json();
+                alert('Ошибка: ' + err.detail);
+            }
+        });
+
+        // Обработка формы продажи (касса)
+        document.getElementById('sell-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const sale = {
+                items: [{
+                    code: document.getElementById('sell-code').value,
+                    quantity: parseInt(document.getElementById('sell-quantity').value)
+                }],
+                payment_type: document.getElementById('sell-payment').value
+            };
+
+            const response = await fetch(`${API_URL}/api/sell`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(sale)
+            });
+
+            if (response.ok) {
+                alert('Чек отправлен на кассу!');
+                e.target.reset();
+                loadProducts();
+            } else {
+                const err = await response.json();
+                alert('Ошибка при продаже: ' + err.detail);
+            }
+        });
+
+        // При открытии страницы сразу загружаем товары
+        loadProducts();
+    </script>
+</body>
+</html>

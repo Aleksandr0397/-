@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import sqlite3
 import requests
 import uuid
+import os
 
 app = FastAPI(title="Складской учет + АТОЛ 50Ф")
 
@@ -47,6 +49,12 @@ class SaleItem(BaseModel):
 class SaleRequest(BaseModel):
     items: list[SaleItem]
     payment_type: str = "cash"
+
+@app.get("/")
+def read_root():
+    if os.path.exists("index.html"):
+        return FileResponse("index.html")
+    return {"message": "index.html не найден"}
 
 @app.get("/api/products")
 def get_products():

@@ -19,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = os.environ.get("INVENTORY_DB_PATH", "/var/data/inventory.db" if os.path.isdir("/var/data") else DB_PATH)
+DB_PATH = os.environ.get("INVENTORY_DB_PATH", "/var/data/inventory.db" if os.path.isdir("/var/data") else "inventory.db")
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)

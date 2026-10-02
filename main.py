@@ -19,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = os.environ.get("INVENTORY_DB_PATH", "inventory.db")
+DB_PATH = os.environ.get("INVENTORY_DB_PATH", "/var/data/inventory.db" if os.path.isdir("/var/data") else DB_PATH)
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -115,19 +115,6 @@ class SaleRequest(BaseModel):
 
 
 
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120000)
-    return salt.hex() + ":" + digest.hex()
-
-def verify_password(password: str, stored: str) -> bool:
-    try:
-        salt_hex, digest_hex = stored.split(":", 1)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), 120000)
-        return secrets.compare_digest(digest.hex(), digest_hex)
-    except (ValueError, TypeError):
-        return False
-
 def get_user(token: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -144,7 +131,7 @@ def require_user(token: str):
 
 @app.post("/api/auth/setup-admin")
 def register(auth: AuthRequest):
-    conn = sqlite3.connect("inventory.db")
+    conn = sqlite3.connect(DB_PATH)
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0:
         conn.close()
         raise HTTPException(status_code=403, detail="Администратор уже создан")
@@ -166,7 +153,7 @@ def register(auth: AuthRequest):
 
 @app.post("/api/auth/login")
 def login(auth: AuthRequest):
-    conn = sqlite3.connect("inventory.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (auth.username.strip(),))
     row = cursor.fetchone()
@@ -193,7 +180,7 @@ def change_credentials(data: CredentialsChangeRequest, authorization: str | None
         raise HTTPException(status_code=400, detail="Логин должен содержать от 3 до 50 символов")
     if len(data.password) < 4:
         raise HTTPException(status_code=400, detail="Пароль должен содержать минимум 4 символа")
-    conn = sqlite3.connect("inventory.db")
+    conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (username, hash_password(data.password), user[0]))
         conn.commit()
@@ -205,7 +192,7 @@ def change_credentials(data: CredentialsChangeRequest, authorization: str | None
 
 @app.post("/api/auth/logout")
 def logout(token: str = ""):
-    conn = sqlite3.connect("inventory.db")
+    conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
     conn.commit()
     conn.close()
@@ -219,7 +206,7 @@ def read_root():
 
 @app.get("/api/public/products")
 def get_public_products():
-    conn = sqlite3.connect("inventory.db")
+    conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("SELECT id, code, name, category, stock, price FROM products").fetchall()
     conn.close()
     return [{"id": r[0], "code": r[1], "name": r[2], "category": r[3], "stock": r[4], "price": r[5]} for r in rows]
@@ -227,7 +214,7 @@ def get_public_products():
 @app.get("/api/products")
 def get_products(authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect('inventory.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id, code, name, category, stock, price FROM products")
     rows = cursor.fetchall()
@@ -237,7 +224,7 @@ def get_products(authorization: str | None = Header(default=None)):
 @app.post("/api/products")
 def add_product(product: Product, authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect('inventory.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -254,7 +241,7 @@ def add_product(product: Product, authorization: str | None = Header(default=Non
 @app.put("/api/products/{product_id}/stock")
 def update_stock(product_id: int, update: StockUpdate, authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect("inventory.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM products WHERE id = ?", (product_id,))
     if not cursor.fetchone():
@@ -268,7 +255,7 @@ def update_stock(product_id: int, update: StockUpdate, authorization: str | None
 @app.post("/api/sell")
 def make_sale(sale: SaleRequest, atol_web_url: str = "http://localhost:16732", authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect('inventory.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     atol_items = []

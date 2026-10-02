@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import sqlite3
+import psycopg
 import requests
 import uuid
 import os
@@ -19,8 +20,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 DB_PATH = os.environ.get("INVENTORY_DB_PATH", "/var/data/inventory.db" if os.path.isdir("/var/data") else "inventory.db")
 
+def get_conn():
+    return psycopg.connect(DATABASE_URL) if DATABASE_URL else sqlite3.connect(DB_PATH)
+
+def execute(conn, query, params=()):
+    return conn.execute(query.replace("?", "%s") if DATABASE_URL else query, params)
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120000)
@@ -35,32 +42,33 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('''
+    ID_DEF = "SERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    execute(cursor, f'''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {ID_DEF},
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    cursor.execute('''
+    execute(cursor, '''
         CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    cursor.execute('''
+    execute(cursor, '''
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )
     ''')
-    cursor.execute('''
+    execute(cursor, f'''
         CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {ID_DEF},
             code TEXT UNIQUE,
             name TEXT,
             category TEXT,
@@ -68,20 +76,49 @@ def init_db():
             price REAL
         )
     ''')
+    # One-time migration from an existing local SQLite database, when available.
+    if DATABASE_URL and os.path.exists(DB_PATH):
+        sqlite_conn = sqlite3.connect(DB_PATH)
+        sqlite_cur = sqlite_conn.cursor()
+        try:
+            old_users = sqlite_cur.execute("SELECT id, username, password_hash, created_at FROM users").fetchall()
+            user_map = {}
+            for row in old_users:
+                execute(cursor, "INSERT INTO users (id, username, password_hash, created_at) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING", row)
+            for row in old_users:
+                target = execute(cursor, "SELECT id FROM users WHERE username = %s", (row[1],)).fetchone()
+                if target:
+                    user_map[row[0]] = target[0]
+            old_sessions = sqlite_cur.execute("SELECT token, user_id, created_at FROM sessions").fetchall()
+            for token, old_user_id, created_at in old_sessions:
+                if old_user_id in user_map:
+                    execute(cursor, "INSERT INTO sessions (token, user_id, created_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (token, user_map[old_user_id], created_at))
+            old_settings = sqlite_cur.execute("SELECT key, value FROM app_settings").fetchall()
+            for row in old_settings:
+                execute(cursor, "INSERT INTO app_settings (key, value) VALUES (%s, %s) ON CONFLICT DO NOTHING", row)
+            old_products = sqlite_cur.execute("SELECT id, code, name, category, stock, price FROM products").fetchall()
+            for row in old_products:
+                execute(cursor, "INSERT INTO products (id, code, name, category, stock, price) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING", row)
+            execute(cursor, "SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1), true)")
+            execute(cursor, "SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products), 1), true)")
+            conn.commit()
+        finally:
+            sqlite_conn.close()
+
     # One-time migration for the initial administrator.
-    initialized = cursor.execute("SELECT value FROM app_settings WHERE key = 'default_admin_initialized'").fetchone()
+    initialized = execute(cursor, "SELECT value FROM app_settings WHERE key = 'default_admin_initialized'").fetchone()
     if not initialized:
         initial_password = "0" * 4
-        admin = cursor.execute("SELECT id FROM users WHERE username = 'admin' LIMIT 1").fetchone()
+        admin = execute(cursor, "SELECT id FROM users WHERE username = 'admin' LIMIT 1").fetchone()
         if admin:
-            cursor.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(initial_password), admin[0]))
+            execute(cursor, "UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(initial_password), admin[0]))
         else:
-            first_user = cursor.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+            first_user = execute(cursor, "SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
             if first_user:
-                cursor.execute("UPDATE users SET username = 'admin', password_hash = ? WHERE id = ?", (hash_password(initial_password), first_user[0]))
+                execute(cursor, "UPDATE users SET username = 'admin', password_hash = ? WHERE id = ?", (hash_password(initial_password), first_user[0]))
             else:
-                cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ("admin", hash_password(initial_password)))
-        cursor.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('default_admin_initialized', '1')")
+                execute(cursor, "INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id", ("admin", hash_password(initial_password)))
+        execute(cursor, "INSERT INTO app_settings (key, value) VALUES ('default_admin_initialized', '1') ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value")
     conn.commit()
     conn.close()
 
@@ -116,9 +153,9 @@ class SaleRequest(BaseModel):
 
 
 def get_user(token: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ?", (token,))
+    execute(cursor, "SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ?", (token,))
     row = cursor.fetchone()
     conn.close()
     return row
@@ -131,8 +168,8 @@ def require_user(token: str):
 
 @app.post("/api/auth/setup-admin")
 def register(auth: AuthRequest):
-    conn = sqlite3.connect(DB_PATH)
-    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0:
+    conn = get_conn()
+    if execute(conn, "SELECT COUNT(*) FROM users").fetchone()[0] > 0:
         conn.close()
         raise HTTPException(status_code=403, detail="Администратор уже создан")
     username = auth.username.strip()
@@ -140,10 +177,10 @@ def register(auth: AuthRequest):
         raise HTTPException(status_code=400, detail="Логин: 3–50 символов, пароль: минимум 4 символа")
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hash_password(auth.password)))
-        user_id = cursor.lastrowid
+        execute(cursor, "INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id", (username, hash_password(auth.password)))
+        user_id = execute(cursor, "SELECT id FROM users WHERE username = ?", (username,)).fetchone()[0]
         token = secrets.token_urlsafe(32)
-        cursor.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
+        execute(cursor, "INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -153,15 +190,15 @@ def register(auth: AuthRequest):
 
 @app.post("/api/auth/login")
 def login(auth: AuthRequest):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (auth.username.strip(),))
+    execute(cursor, "SELECT id, username, password_hash FROM users WHERE username = ?", (auth.username.strip(),))
     row = cursor.fetchone()
     if not row or not verify_password(auth.password, row[2]):
         conn.close()
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     token = secrets.token_urlsafe(32)
-    cursor.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, row[0]))
+    execute(cursor, "INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, row[0]))
     conn.commit()
     conn.close()
     return {"status": "success", "token": token, "username": row[1]}
@@ -180,9 +217,9 @@ def change_credentials(data: CredentialsChangeRequest, authorization: str | None
         raise HTTPException(status_code=400, detail="Логин должен содержать от 3 до 50 символов")
     if len(data.password) < 4:
         raise HTTPException(status_code=400, detail="Пароль должен содержать минимум 4 символа")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     try:
-        conn.execute("UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (username, hash_password(data.password), user[0]))
+        execute(conn, "UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (username, hash_password(data.password), user[0]))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -192,8 +229,8 @@ def change_credentials(data: CredentialsChangeRequest, authorization: str | None
 
 @app.post("/api/auth/logout")
 def logout(token: str = ""):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    conn = get_conn()
+    execute(conn, "DELETE FROM sessions WHERE token = ?", (token,))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -206,17 +243,17 @@ def read_root():
 
 @app.get("/api/public/products")
 def get_public_products():
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT id, code, name, category, stock, price FROM products").fetchall()
+    conn = get_conn()
+    rows = execute(conn, "SELECT id, code, name, category, stock, price FROM products").fetchall()
     conn.close()
     return [{"id": r[0], "code": r[1], "name": r[2], "category": r[3], "stock": r[4], "price": r[5]} for r in rows]
 
 @app.get("/api/products")
 def get_products(authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, code, name, category, stock, price FROM products")
+    execute(cursor, "SELECT id, code, name, category, stock, price FROM products")
     rows = cursor.fetchall()
     conn.close()
     return [{"id": r[0], "code": r[1], "name": r[2], "category": r[3], "stock": r[4], "price": r[5]} for r in rows]
@@ -224,10 +261,10 @@ def get_products(authorization: str | None = Header(default=None)):
 @app.post("/api/products")
 def add_product(product: Product, authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     try:
-        cursor.execute(
+        execute(cursor,
             "INSERT INTO products (code, name, category, stock, price) VALUES (?, ?, ?, ?, ?)",
             (product.code, product.name, product.category, product.stock, product.price)
         )
@@ -241,13 +278,13 @@ def add_product(product: Product, authorization: str | None = Header(default=Non
 @app.put("/api/products/{product_id}/stock")
 def update_stock(product_id: int, update: StockUpdate, authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM products WHERE id = ?", (product_id,))
+    execute(cursor, "SELECT id FROM products WHERE id = ?", (product_id,))
     if not cursor.fetchone():
         conn.close()
         raise HTTPException(status_code=404, detail="Товар не найден")
-    cursor.execute("UPDATE products SET stock = ? WHERE id = ?", (update.stock, product_id))
+    execute(cursor, "UPDATE products SET stock = ? WHERE id = ?", (update.stock, product_id))
     conn.commit()
     conn.close()
     return {"status": "success", "stock": update.stock}
@@ -255,14 +292,14 @@ def update_stock(product_id: int, update: StockUpdate, authorization: str | None
 @app.post("/api/sell")
 def make_sale(sale: SaleRequest, atol_web_url: str = "http://localhost:16732", authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
 
     atol_items = []
     total_sum = 0.0
 
     for item in sale.items:
-        cursor.execute("SELECT name, price, stock FROM products WHERE code = ?", (item.code,))
+        execute(cursor, "SELECT name, price, stock FROM products WHERE code = ?", (item.code,))
         row = cursor.fetchone()
         if not row:
             conn.close()
@@ -313,7 +350,7 @@ def make_sale(sale: SaleRequest, atol_web_url: str = "http://localhost:16732", a
         raise HTTPException(status_code=503, detail="Касса недоступна")
 
     for item in sale.items:
-        cursor.execute("UPDATE products SET stock = stock - ? WHERE code = ?", (item.quantity, item.code))
+        execute(cursor, "UPDATE products SET stock = stock - ? WHERE code = ?", (item.quantity, item.code))
 
     conn.commit()
     conn.close()

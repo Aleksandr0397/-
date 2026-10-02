@@ -184,7 +184,7 @@
 
             const response = await fetch(`${API_URL}/api/sell`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(),
                 body: JSON.stringify(sale)
             });
 

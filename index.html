@@ -16,190 +16,241 @@
         button:hover { background-color: #218838; }
         .sell-btn { background-color: #005FF9; }
         .sell-btn:hover { background-color: #0044cc; }
+        .error { color: #b00020; margin-top: 10px; font-weight: bold; }
+        .info { color: #444; margin-top: 10px; }
     </style>
 </head>
 <body>
     <div id="public-site">
-        <header style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h1>Магазин</h1><button type="button" onclick="showLogin()" style="width:auto">Личный кабинет администратора</button></header>
+        <header style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <h1>Магазин</h1>
+            <button type="button" onclick="showLogin()" style="width:auto">Личный кабинет администратора</button>
+        </header>
         <div class="panel"><h2>Каталог товаров</h2><div id="public-products">Загрузка...</div></div>
     </div>
+
     <div id="login-site" style="display:none">
-        <div class="panel" style="max-width:420px;margin:40px auto"><h2>Вход администратора</h2><form id="login-form"><input id="login-user" placeholder="Логин" required><input id="login-pass" type="password" placeholder="Пароль" required><button type="submit">Войти</button></form><div id="setup-box" style="margin-top:20px"><hr><p>Первый запуск? Создайте администратора.</p><button type="button" onclick="showSetup()">Создать администратора</button></div><button type="button" onclick="showPublic()" style="background:#777">Вернуться на сайт</button></div>
+        <div class="panel" style="max-width:420px;margin:40px auto">
+            <h2 id="auth-title">Вход администратора</h2>
+            <p id="auth-info" class="info"></p>
+            <form id="login-form">
+                <input id="login-user" placeholder="Логин" autocomplete="username" required>
+                <input id="login-pass" type="password" placeholder="Пароль" autocomplete="current-password" required>
+                <button type="submit">Войти</button>
+            </form>
+            <div id="setup-box" style="margin-top:20px">
+                <hr>
+                <p>Если это первый запуск, создайте администратора.</p>
+                <button type="button" onclick="showSetup()">Создать администратора</button>
+            </div>
+            <div id="auth-error" class="error"></div>
+            <button type="button" onclick="showPublic()" style="background:#777">Вернуться на сайт</button>
+        </div>
     </div>
+
     <div id="admin-site" style="display:none">
+        <header style="display:flex;justify-content:space-between;align-items:center">
+            <h1>Панель администратора</h1>
+            <button type="button" onclick="logout()" style="width:auto;background:#777">Выйти</button>
+        </header>
 
-    <header style="display:flex;justify-content:space-between;align-items:center"><h1>Панель администратора</h1><button type="button" onclick="logout()" style="width:auto;background:#777">Выйти</button></header>
+        <div class="container">
+            <div class="panel">
+                <h2>Добавить товар</h2>
+                <form id="add-form">
+                    <input type="text" id="add-code" placeholder="Артикул (штрихкод)" required>
+                    <input type="text" id="add-name" placeholder="Название товара" required>
+                    <input type="text" id="add-category" placeholder="Категория" required>
+                    <input type="number" id="add-stock" placeholder="Количество на склад" min="0" required>
+                    <input type="number" step="0.01" id="add-price" placeholder="Цена за 1 шт." min="0.01" required>
+                    <button type="submit">Добавить на склад</button>
+                </form>
+            </div>
 
-    <div class="container">
-        <!-- Блок добавления товара -->
-        <div class="panel">
-            <h2>Добавить товар</h2>
-            <form id="add-form">
-                <input type="text" id="add-code" placeholder="Артикул (штрихкод)" required>
-                <input type="text" id="add-name" placeholder="Название товара" required>
-                <input type="text" id="add-category" placeholder="Категория" required>
-                <input type="number" id="add-stock" placeholder="Количество на склад" required>
-                <input type="number" step="0.01" id="add-price" placeholder="Цена за 1 шт." required>
-                <button type="submit">Добавить на склад</button>
-            </form>
+            <div class="panel">
+                <h2>Продать (Пробить чек)</h2>
+                <form id="sell-form">
+                    <input type="text" id="sell-code" placeholder="Артикул товара" required>
+                    <input type="number" id="sell-quantity" placeholder="Количество для продажи" min="1" required>
+                    <select id="sell-payment">
+                        <option value="cash">Наличные</option>
+                        <option value="electronically">Банковская карта</option>
+                    </select>
+                    <button type="submit" class="sell-btn">Пробить чек на АТОЛ</button>
+                </form>
+            </div>
         </div>
 
-        <!-- Блок продажи -->
-        <div class="panel">
-            <h2>Продать (Пробить чек)</h2>
-            <form id="sell-form">
-                <input type="text" id="sell-code" placeholder="Артикул товара" required>
-                <input type="number" id="sell-quantity" placeholder="Количество для продажи" required>
-                <select id="sell-payment">
-                    <option value="cash">Наличные</option>
-                    <option value="electronically">Банковская карта</option>
-                </select>
-                <button type="submit" class="sell-btn">Пробить чек на АТОЛ</button>
-            </form>
+        <div class="panel" style="margin-top: 20px;">
+            <h2>Остатки на складе</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Артикул</th><th>Название</th><th>Категория</th><th>Остаток</th><th>Цена</th><th>Изменить остаток</th>
+                    </tr>
+                </thead>
+                <tbody id="product-list"></tbody>
+            </table>
         </div>
     </div>
 
-    <!-- Таблица остатков -->
-    <div class="panel" style="margin-top: 20px;">
-        <h2>Остатки на складе</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Артикул</th>
-                    <th>Название</th>
-                    <th>Категория</th>
-                    <th>Остаток</th>
-                    <th>Цена</th>
-                    <th>Изменить остаток</th>
-                </tr>
-            </thead>
-            <tbody id="product-list">
-                <!-- Сюда будут загружаться товары -->
-            </tbody>
-        </table>
-    </div>
-
-    </div>
     <script>
-        // Здесь мы указываем адрес, куда фронтенд будет отправлять запросы. 
-        // Пока оставим пустой строкой, чтобы запросы шли на тот же сервер.
         const API_URL = '';
         let authToken = localStorage.getItem("admin_token") || "";
-        function authHeaders(){ return authToken ? {"Authorization":"Bearer " + authToken, "Content-Type":"application/json"} : {"Content-Type":"application/json"}; }
-        function showPublic(){ document.getElementById("public-site").style.display="block"; document.getElementById("login-site").style.display="none"; document.getElementById("admin-site").style.display="none"; loadPublicProducts(); }
-        function showLogin(){ document.getElementById("public-site").style.display="none"; document.getElementById("login-site").style.display="block"; document.getElementById("admin-site").style.display="none"; }
-        function showSetup(){ const f=document.getElementById("login-form"); f.innerHTML="<input id=\"login-user\" placeholder=\"Логин\" required><input id=\"login-pass\" type=\"password\" placeholder=\"Пароль\" required><button type=\"submit\">Создать администратора</button>"; f.dataset.setup="1"; }
-        async function loadPublicProducts(){ const r=await fetch(API_URL+"/api/public/products"); const ps=await r.json(); document.getElementById("public-products").innerHTML=ps.length ? "<table><tr><th>Товар</th><th>Категория</th><th>Цена</th></tr>"+ps.map(p=>"<tr><td>"+p.name+"</td><td>"+p.category+"</td><td>"+p.price+" ₽</td></tr>").join("")+"</table>" : "<p>Товары пока не добавлены.</p>"; }
-        async function logout(){ await fetch(API_URL+"/api/auth/logout?token="+encodeURIComponent(authToken),{method:"POST"}); localStorage.removeItem("admin_token"); authToken=""; showPublic(); } 
 
-        // Функция загрузки товаров с сервера
-        async function loadProducts() {
+        function authHeaders() {
+            return authToken
+                ? {"Authorization":"Bearer " + authToken, "Content-Type":"application/json"}
+                : {"Content-Type":"application/json"};
+        }
+
+        function showPublic() {
+            document.getElementById("public-site").style.display="block";
+            document.getElementById("login-site").style.display="none";
+            document.getElementById("admin-site").style.display="none";
+            loadPublicProducts();
+        }
+
+        function showLogin() {
+            document.getElementById("public-site").style.display="none";
+            document.getElementById("login-site").style.display="block";
+            document.getElementById("admin-site").style.display="none";
+            document.getElementById("auth-title").textContent="Вход администратора";
+            document.getElementById("auth-info").textContent="Введите логин и пароль администратора.";
+            document.getElementById("login-form").dataset.setup="0";
+            document.getElementById("login-form").querySelector("button").textContent="Войти";
+            document.getElementById("login-pass").setAttribute("autocomplete","current-password");
+            document.getElementById("setup-box").style.display="block";
+            document.getElementById("auth-error").textContent="";
+        }
+
+        function showSetup() {
+            const form=document.getElementById("login-form");
+            document.getElementById("auth-title").textContent="Создание администратора";
+            document.getElementById("auth-info").textContent="Это работает только для первого администратора. Логин — от 3 до 50 символов, пароль — минимум 6 символов.";
+            form.dataset.setup="1";
+            form.querySelector("button").textContent="Создать администратора";
+            document.getElementById("login-pass").setAttribute("autocomplete","new-password");
+            document.getElementById("setup-box").style.display="none";
+            document.getElementById("auth-error").textContent="";
+            document.getElementById("login-user").focus();
+        }
+
+        async function loadPublicProducts() {
             try {
-                const response = await fetch(`${API_URL}/api/products`, {headers: authHeaders()});
-                const products = await response.json();
-                const tbody = document.getElementById('product-list');
-                tbody.innerHTML = '';
-                
-                products.forEach(p => {
-                    const tr = document.createElement('tr');
-                    tr.innerHTML = `
-                        <td>${p.code}</td>
-                        <td>${p.name}</td>
-                        <td>${p.category}</td>
-                        <td><b>${p.stock}</b></td>
-                        <td>${p.price} ₽</td>
-                        <td><input type="number" min="0" value="${p.stock}" id="stock-${p.id}" style="width:90px"><button type="button" onclick="updateStock(${p.id})" style="width:auto;margin-left:5px">Сохранить</button></td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-            } catch (error) {
-                console.error("Ошибка загрузки", error);
+                const r=await fetch(API_URL+"/api/public/products");
+                const ps=await r.json();
+                document.getElementById("public-products").innerHTML=ps.length
+                    ? "<table><tr><th>Товар</th><th>Категория</th><th>Цена</th></tr>"+ps.map(p=>"<tr><td>"+p.name+"</td><td>"+p.category+"</td><td>"+p.price+" ₽</td></tr>").join("")+"</table>"
+                    : "<p>Товары пока не добавлены.</p>";
+            } catch(e) {
+                document.getElementById("public-products").textContent="Не удалось загрузить каталог.";
             }
         }
 
-        // Обработка формы добавления товара
-        document.getElementById('add-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const product = {
-                code: document.getElementById('add-code').value,
-                name: document.getElementById('add-name').value,
-                category: document.getElementById('add-category').value,
-                stock: parseInt(document.getElementById('add-stock').value),
-                price: parseFloat(document.getElementById('add-price').value)
-            };
+        async function logout() {
+            if (authToken) await fetch(API_URL+"/api/auth/logout?token="+encodeURIComponent(authToken),{method:"POST"});
+            localStorage.removeItem("admin_token");
+            authToken="";
+            showPublic();
+        }
 
-            const response = await fetch(`${API_URL}/api/products`, {
-                method: 'POST',
-                headers: authHeaders(),
-                body: JSON.stringify(product)
-            });
-
-            if (response.ok) {
-                alert('Товар успешно добавлен!');
-                e.target.reset();
-                loadProducts();
-            } else {
-                const err = await response.json();
-                alert('Ошибка: ' + err.detail);
+        async function loadProducts() {
+            try {
+                const response=await fetch(API_URL+"/api/products",{headers:authHeaders()});
+                if(response.status===401){ localStorage.removeItem("admin_token"); authToken=""; showLogin(); return; }
+                const products=await response.json();
+                const tbody=document.getElementById("product-list");
+                tbody.innerHTML="";
+                products.forEach(p=>{
+                    const tr=document.createElement("tr");
+                    tr.innerHTML='<td>'+p.code+'</td><td>'+p.name+'</td><td>'+p.category+'</td><td><b>'+p.stock+'</b></td><td>'+p.price+' ₽</td><td><input type="number" min="0" value="'+p.stock+'" id="stock-'+p.id+'" style="width:90px"><button type="button" onclick="updateStock('+p.id+')" style="width:auto;margin-left:5px">Сохранить</button></td>';
+                    tbody.appendChild(tr);
+                });
+            } catch(error) {
+                console.error("Ошибка загрузки",error);
             }
+        }
+
+        document.getElementById("add-form").addEventListener("submit",async e=>{
+            e.preventDefault();
+            const product={
+                code:document.getElementById("add-code").value.trim(),
+                name:document.getElementById("add-name").value.trim(),
+                category:document.getElementById("add-category").value.trim(),
+                stock:parseInt(document.getElementById("add-stock").value,10),
+                price:parseFloat(document.getElementById("add-price").value)
+            };
+            const response=await fetch(API_URL+"/api/products",{method:"POST",headers:authHeaders(),body:JSON.stringify(product)});
+            const data=await response.json();
+            if(response.ok){ alert("Товар успешно добавлен!"); e.target.reset(); loadProducts(); }
+            else alert("Ошибка: "+(data.detail||"неизвестная ошибка"));
         });
 
         async function updateStock(id) {
-            const input = document.getElementById("stock-" + id);
-            const stock = parseInt(input.value, 10);
-            if (!Number.isInteger(stock) || stock < 0) {
-                alert("Количество должно быть целым числом не меньше 0");
-                return;
-            }
-            const response = await fetch(API_URL + "/api/products/" + id + "/stock", {
-                method: "PUT",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({stock})
-            });
-            if (response.ok) {
-                alert("Остаток обновлён");
-                loadProducts();
-            } else {
-                const err = await response.json();
-                alert("Ошибка изменения остатка: " + (err.detail || "неизвестная ошибка"));
-            }
+            const input=document.getElementById("stock-"+id);
+            const stock=parseInt(input.value,10);
+            if(!Number.isInteger(stock)||stock<0){ alert("Количество должно быть целым числом не меньше 0"); return; }
+            const response=await fetch(API_URL+"/api/products/"+id+"/stock",{method:"PUT",headers:authHeaders(),body:JSON.stringify({stock})});
+            const data=await response.json();
+            if(response.ok){ alert("Остаток обновлён"); loadProducts(); }
+            else alert("Ошибка изменения остатка: "+(data.detail||"неизвестная ошибка"));
         }
 
-        // Обработка формы продажи (касса)
-        document.getElementById('sell-form').addEventListener('submit', async (e) => {
+        document.getElementById("sell-form").addEventListener("submit",async e=>{
             e.preventDefault();
-            const quantity = parseInt(document.getElementById("sell-quantity").value, 10);
-            if (!Number.isInteger(quantity) || quantity <= 0) {
-                alert("Количество для продажи должно быть целым числом больше 0");
-                return;
-            }
+            const quantity=parseInt(document.getElementById("sell-quantity").value,10);
+            if(!Number.isInteger(quantity)||quantity<=0){ alert("Количество для продажи должно быть целым числом больше 0"); return; }
+            const sale={items:[{code:document.getElementById("sell-code").value.trim(),quantity}],payment_type:document.getElementById("sell-payment").value};
+            const response=await fetch(API_URL+"/api/sell",{method:"POST",headers:authHeaders(),body:JSON.stringify(sale)});
+            const data=await response.json();
+            if(response.ok){ alert("Чек отправлен на кассу!"); e.target.reset(); loadProducts(); }
+            else alert("Ошибка при продаже: "+(data.detail||"неизвестная ошибка"));
+        });
 
-            const sale = {
-                items: [{
-                    code: document.getElementById('sell-code').value,
-                    quantity
-                }],
-                payment_type: document.getElementById('sell-payment').value
-            };
+        document.getElementById("login-form").addEventListener("submit",async e=>{
+            e.preventDefault();
+            const setup=e.target.dataset.setup==="1";
+            const username=document.getElementById("login-user").value.trim();
+            const password=document.getElementById("login-pass").value;
+            const errorBox=document.getElementById("auth-error");
+            errorBox.textContent="";
 
-            const response = await fetch(`${API_URL}/api/sell`, {
-                method: 'POST',
-                headers: authHeaders(),
-                body: JSON.stringify(sale)
-            });
+            if(username.length<3||username.length>50){ errorBox.textContent="Логин должен содержать от 3 до 50 символов."; return; }
+            if(setup&&password.length<6){ errorBox.textContent="Пароль должен содержать минимум 6 символов."; return; }
+            if(!password){ errorBox.textContent="Введите пароль."; return; }
 
-            if (response.ok) {
-                alert('Чек отправлен на кассу!');
-                e.target.reset();
+            const endpoint=setup?"/api/auth/setup-admin":"/api/auth/login";
+            try {
+                const r=await fetch(API_URL+endpoint,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
+                const data=await r.json();
+                if(!r.ok){
+                    if(r.status===403){
+                        errorBox.textContent="Администратор уже создан. Вернитесь к входу и войдите с его логином и паролем.";
+                        document.getElementById("setup-box").style.display="block";
+                    } else {
+                        errorBox.textContent=data.detail||"Не удалось выполнить операцию.";
+                    }
+                    return;
+                }
+                authToken=data.token;
+                localStorage.setItem("admin_token",authToken);
+                document.getElementById("public-site").style.display="none";
+                document.getElementById("login-site").style.display="none";
+                document.getElementById("admin-site").style.display="block";
                 loadProducts();
-            } else {
-                const err = await response.json();
-                alert('Ошибка при продаже: ' + err.detail);
+            } catch(error) {
+                errorBox.textContent="Сайт не смог связаться с сервером. После обновления Render попробуйте ещё раз.";
             }
         });
 
-        document.getElementById("login-form").addEventListener("submit", async (e) => { e.preventDefault(); const setup=e.target.dataset.setup==="1"; const endpoint=setup?"/api/auth/setup-admin":"/api/auth/login"; const r=await fetch(API_URL+endpoint,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("login-user").value,password:document.getElementById("login-pass").value})}); const data=await r.json(); if(!r.ok){alert(data.detail||"Ошибка");return;} authToken=data.token; localStorage.setItem("admin_token",authToken); document.getElementById("public-site").style.display="none";document.getElementById("login-site").style.display="none";document.getElementById("admin-site").style.display="block";loadProducts(); });
-        if(authToken){ document.getElementById("admin-site").style.display="block"; document.getElementById("public-site").style.display="none"; loadProducts(); } else { showPublic(); }
+        if(authToken){
+            document.getElementById("admin-site").style.display="block";
+            document.getElementById("public-site").style.display="none";
+            loadProducts();
+        } else {
+            showPublic();
+        }
     </script>
 </body>
 </html>

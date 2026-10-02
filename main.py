@@ -27,7 +27,7 @@ def get_conn():
     return psycopg.connect(DATABASE_URL) if DATABASE_URL else sqlite3.connect(DB_PATH)
 
 def execute(conn, query, params=()):
-    return execute(conn, query.replace("?", "%s") if DATABASE_URL else query, params)
+    return conn.execute(query.replace("?", "%s") if DATABASE_URL else query, params)
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120000)
@@ -46,7 +46,7 @@ def init_db():
     cursor = conn.cursor()
     execute(cursor, '''
         CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP

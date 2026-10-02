@@ -103,12 +103,15 @@ def require_user(token: str):
         raise HTTPException(status_code=401, detail="Требуется вход в личный кабинет")
     return user
 
-@app.post("/api/auth/register")
+@app.post("/api/auth/setup-admin")
 def register(auth: AuthRequest):
+    conn = sqlite3.connect("inventory.db")
+    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Администратор уже создан")
     username = auth.username.strip()
     if len(username) < 3 or len(username) > 50 or len(auth.password) < 6:
         raise HTTPException(status_code=400, detail="Логин: 3–50 символов, пароль: минимум 6 символов")
-    conn = sqlite3.connect("inventory.db")
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hash_password(auth.password)))
@@ -156,7 +159,7 @@ def read_root():
         return FileResponse("index.html")
     return {"message": "index.html не найден"}
 
-@app.get("/api/products")
+@app.get("/api/public/products")\ndef get_public_products():\n    conn = sqlite3.connect("inventory.db")\n    rows = conn.execute("SELECT id, code, name, category, stock, price FROM products").fetchall()\n    conn.close()\n    return [{"id": r[0], "code": r[1], "name": r[2], "category": r[3], "stock": r[4], "price": r[5]} for r in rows]\n\n@app.get("/api/products")
 def get_products(authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
     conn = sqlite3.connect('inventory.db')

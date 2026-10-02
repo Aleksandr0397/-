@@ -21,6 +21,19 @@ app.add_middleware(
 
 DB_PATH = os.environ.get("INVENTORY_DB_PATH", "inventory.db")
 
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120000)
+    return salt.hex() + ":" + digest.hex()
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt_hex, digest_hex = stored.split(":", 1)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), 120000)
+        return secrets.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

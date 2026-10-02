@@ -45,7 +45,7 @@ def init_db():
     conn = get_conn()
     cursor = conn.cursor()
     ID_DEF = "SERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    execute(cursor, '''
+    execute(cursor, f'''
         CREATE TABLE IF NOT EXISTS users (
             id {ID_DEF},
             username TEXT UNIQUE NOT NULL,
@@ -66,7 +66,7 @@ def init_db():
             value TEXT NOT NULL
         )
     ''')
-    execute(cursor, '''
+    execute(cursor, f'''
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
             code TEXT UNIQUE,

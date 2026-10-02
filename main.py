@@ -44,9 +44,10 @@ def verify_password(password: str, stored: str) -> bool:
 def init_db():
     conn = get_conn()
     cursor = conn.cursor()
+    ID_DEF = "SERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"
     execute(cursor, '''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {ID_DEF},
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP

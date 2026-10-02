@@ -32,16 +32,18 @@
     <div id="login-site" style="display:none">
         <div class="panel" style="max-width:420px;margin:40px auto">
             <h2 id="auth-title">Вход администратора</h2>
-            <p id="auth-info" class="info"></p>
+            <p id="auth-info" class="info">Введите логин и пароль администратора.</p>
             <form id="login-form">
                 <input id="login-user" placeholder="Логин" autocomplete="username" required>
                 <input id="login-pass" type="password" placeholder="Пароль" autocomplete="current-password" required>
                 <button type="submit">Войти</button>
             </form>
             <div id="setup-box" style="margin-top:20px">
+                <p><b>Доступ администратора уже подготовлен.</b></p>
+                <p>Логин: <b>admin</b><br>Пароль: <b>четыре нуля</b></p>
+                <p class="info">После входа пароль и логин можно изменить.</p>
                 <hr>
-                <p>Если это первый запуск, создайте администратора.</p>
-                <button type="button" onclick="showSetup()">Создать администратора</button>
+
             </div>
             <div id="auth-error" class="error"></div>
             <button type="button" onclick="showPublic()" style="background:#777">Вернуться на сайт</button>
@@ -55,6 +57,16 @@
         </header>
 
         <div class="container">
+            <div class="panel">
+                <h2>Данные администратора</h2>
+                <p class="info">Здесь можно изменить логин и пароль для входа.</p>
+                <form id="credentials-form">
+                    <input type="text" id="new-admin-user" placeholder="Новый логин" minlength="3" maxlength="50" required>
+                    <input type="password" id="new-admin-pass" placeholder="Новый пароль (минимум 4 символа)" minlength="4" required>
+                    <button type="submit">Сохранить данные</button>
+                </form>
+                <div id="credentials-message" class="info"></div>
+            </div>
             <div class="panel">
                 <h2>Добавить товар</h2>
                 <form id="add-form">
@@ -125,9 +137,10 @@
         }
 
         function showSetup() {
+            showLogin();
             const form=document.getElementById("login-form");
             document.getElementById("auth-title").textContent="Создание администратора";
-            document.getElementById("auth-info").textContent="Это работает только для первого администратора. Логин — от 3 до 50 символов, пароль — минимум 6 символов.";
+            document.getElementById("auth-info").textContent="Администратор создаётся автоматически. Для входа используйте подготовленные данные.";
             form.dataset.setup="1";
             form.querySelector("button").textContent="Создать администратора";
             document.getElementById("login-pass").setAttribute("autocomplete","new-password");
@@ -197,6 +210,32 @@
             else alert("Ошибка изменения остатка: "+(data.detail||"неизвестная ошибка"));
         }
 
+        document.getElementById("credentials-form").addEventListener("submit",async e=>{
+            e.preventDefault();
+            const username=document.getElementById("new-admin-user").value.trim();
+            const password=document.getElementById("new-admin-pass").value;
+            const message=document.getElementById("credentials-message");
+            if(username.length<3||username.length>50){ message.textContent="Логин должен содержать от 3 до 50 символов."; return; }
+            if(password.length<4){ message.textContent="Пароль должен содержать минимум 4 символа."; return; }
+            try {
+                const response=await fetch(API_URL+"/api/auth/credentials",{method:"PUT",headers:authHeaders(),body:JSON.stringify({username,password})});
+                const data=await response.json();
+                if(response.ok){
+                    message.textContent="Данные администратора изменены. Текущая сессия остаётся активной.";
+                    e.target.reset();
+                } else if(response.status===401){
+                    message.textContent="Сессия истекла. Войдите снова.";
+                    localStorage.removeItem("admin_token");
+                    authToken="";
+                    showLogin();
+                } else {
+                    message.textContent=data.detail||"Не удалось изменить данные.";
+                }
+            } catch(error) {
+                message.textContent="Не удалось связаться с сервером.";
+            }
+        });
+
         document.getElementById("sell-form").addEventListener("submit",async e=>{
             e.preventDefault();
             const quantity=parseInt(document.getElementById("sell-quantity").value,10);
@@ -217,7 +256,7 @@
             errorBox.textContent="";
 
             if(username.length<3||username.length>50){ errorBox.textContent="Логин должен содержать от 3 до 50 символов."; return; }
-            if(setup&&password.length<6){ errorBox.textContent="Пароль должен содержать минимум 6 символов."; return; }
+            if(setup&&password.length<4){ errorBox.textContent="Пароль должен содержать минимум 4 символа."; return; }
             if(!password){ errorBox.textContent="Введите пароль."; return; }
 
             const endpoint=setup?"/api/auth/setup-admin":"/api/auth/login";

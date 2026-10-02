@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -157,7 +157,8 @@ def read_root():
     return {"message": "index.html не найден"}
 
 @app.get("/api/products")
-def get_products():
+def get_products(authorization: str | None = Header(default=None)):
+    require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
     conn = sqlite3.connect('inventory.db')
     cursor = conn.cursor()
     cursor.execute("SELECT id, code, name, category, stock, price FROM products")
@@ -166,7 +167,8 @@ def get_products():
     return [{"id": r[0], "code": r[1], "name": r[2], "category": r[3], "stock": r[4], "price": r[5]} for r in rows]
 
 @app.post("/api/products")
-def add_product(product: Product):
+def add_product(product: Product, authorization: str | None = Header(default=None)):
+    require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
     conn = sqlite3.connect('inventory.db')
     cursor = conn.cursor()
     try:
@@ -182,7 +184,8 @@ def add_product(product: Product):
     return {"status": "success"}
 
 @app.put("/api/products/{product_id}/stock")
-def update_stock(product_id: int, update: StockUpdate):
+def update_stock(product_id: int, update: StockUpdate, authorization: str | None = Header(default=None)):
+    require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
     conn = sqlite3.connect("inventory.db")
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM products WHERE id = ?", (product_id,))
@@ -195,7 +198,8 @@ def update_stock(product_id: int, update: StockUpdate):
     return {"status": "success", "stock": update.stock}
 
 @app.post("/api/sell")
-def make_sale(sale: SaleRequest, atol_web_url: str = "http://localhost:16732"):
+def make_sale(sale: SaleRequest, atol_web_url: str = "http://localhost:16732", authorization: str | None = Header(default=None)):
+    require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
     conn = sqlite3.connect('inventory.db')
     cursor = conn.cursor()
 

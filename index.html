@@ -19,8 +19,16 @@
     </style>
 </head>
 <body>
+    <div id="public-site">
+        <header style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h1>Магазин</h1><button type="button" onclick="showLogin()" style="width:auto">Личный кабинет администратора</button></header>
+        <div class="panel"><h2>Каталог товаров</h2><div id="public-products">Загрузка...</div></div>
+    </div>
+    <div id="login-site" style="display:none">
+        <div class="panel" style="max-width:420px;margin:40px auto"><h2>Вход администратора</h2><form id="login-form"><input id="login-user" placeholder="Логин" required><input id="login-pass" type="password" placeholder="Пароль" required><button type="submit">Войти</button></form><div id="setup-box" style="margin-top:20px"><hr><p>Первый запуск? Создайте администратора.</p><button type="button" onclick="showSetup()">Создать администратора</button></div><button type="button" onclick="showPublic()" style="background:#777">Вернуться на сайт</button></div>
+    </div>
+    <div id="admin-site" style="display:none">
 
-    <h1>Управление складом</h1>
+    <header style="display:flex;justify-content:space-between;align-items:center"><h1>Панель администратора</h1><button type="button" onclick="logout()" style="width:auto;background:#777">Выйти</button></header>
 
     <div class="container">
         <!-- Блок добавления товара -->
@@ -71,15 +79,23 @@
         </table>
     </div>
 
+    </div>
     <script>
         // Здесь мы указываем адрес, куда фронтенд будет отправлять запросы. 
         // Пока оставим пустой строкой, чтобы запросы шли на тот же сервер.
-        const API_URL = ''; 
+        const API_URL = '';
+        let authToken = localStorage.getItem("admin_token") || "";
+        function authHeaders(){ return authToken ? {"Authorization":"Bearer " + authToken, "Content-Type":"application/json"} : {"Content-Type":"application/json"}; }
+        function showPublic(){ document.getElementById("public-site").style.display="block"; document.getElementById("login-site").style.display="none"; document.getElementById("admin-site").style.display="none"; loadPublicProducts(); }
+        function showLogin(){ document.getElementById("public-site").style.display="none"; document.getElementById("login-site").style.display="block"; document.getElementById("admin-site").style.display="none"; }
+        function showSetup(){ const f=document.getElementById("login-form"); f.innerHTML="<input id=\"login-user\" placeholder=\"Логин\" required><input id=\"login-pass\" type=\"password\" placeholder=\"Пароль\" required><button type=\"submit\">Создать администратора</button>"; f.dataset.setup="1"; }
+        async function loadPublicProducts(){ const r=await fetch(API_URL+"/api/public/products"); const ps=await r.json(); document.getElementById("public-products").innerHTML=ps.length ? "<table><tr><th>Товар</th><th>Категория</th><th>Цена</th></tr>"+ps.map(p=>"<tr><td>"+p.name+"</td><td>"+p.category+"</td><td>"+p.price+" ₽</td></tr>").join("")+"</table>" : "<p>Товары пока не добавлены.</p>"; }
+        async function logout(){ await fetch(API_URL+"/api/auth/logout?token="+encodeURIComponent(authToken),{method:"POST"}); localStorage.removeItem("admin_token"); authToken=""; showPublic(); } 
 
         // Функция загрузки товаров с сервера
         async function loadProducts() {
             try {
-                const response = await fetch(`${API_URL}/api/products`);
+                const response = await fetch(`${API_URL}/api/products`, {headers: authHeaders()});
                 const products = await response.json();
                 const tbody = document.getElementById('product-list');
                 tbody.innerHTML = '';
@@ -114,7 +130,7 @@
 
             const response = await fetch(`${API_URL}/api/products`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(),
                 body: JSON.stringify(product)
             });
 
@@ -182,8 +198,8 @@
             }
         });
 
-        // При открытии страницы сразу загружаем товары
-        loadProducts();
+        document.getElementById("login-form").addEventListener("submit", async (e) => { e.preventDefault(); const setup=e.target.dataset.setup==="1"; const endpoint=setup?"/api/auth/setup-admin":"/api/auth/login"; const r=await fetch(API_URL+endpoint,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("login-user").value,password:document.getElementById("login-pass").value})}); const data=await r.json(); if(!r.ok){alert(data.detail||"Ошибка");return;} authToken=data.token; localStorage.setItem("admin_token",authToken); document.getElementById("public-site").style.display="none";document.getElementById("login-site").style.display="none";document.getElementById("admin-site").style.display="block";loadProducts(); });
+        if(authToken){ document.getElementById("admin-site").style.display="block"; document.getElementById("public-site").style.display="none"; loadProducts(); } else { showPublic(); }
     </script>
 </body>
 </html>

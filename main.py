@@ -6,6 +6,8 @@ import sqlite3
 import requests
 import uuid
 import os
+import hashlib
+import secrets
 
 app = FastAPI(title="Складской учет + АТОЛ 50Ф")
 
@@ -21,6 +23,21 @@ def init_db():
     conn = sqlite3.connect('inventory.db')
     cursor = conn.cursor()
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT UNIQUE,
@@ -34,6 +51,10 @@ def init_db():
     conn.close()
 
 init_db()
+
+class AuthRequest(BaseModel):
+    username: str
+    password: str
 
 class Product(BaseModel):
     code: str
@@ -52,6 +73,82 @@ class StockUpdate(BaseModel):
 class SaleRequest(BaseModel):
     items: list[SaleItem]
     payment_type: str = "cash"
+
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120000)
+    return salt.hex() + ":" + digest.hex()
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt_hex, digest_hex = stored.split(":", 1)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), 120000)
+        return secrets.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
+
+def get_user(token: str):
+    conn = sqlite3.connect("inventory.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ?", (token,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def require_user(token: str):
+    user = get_user(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Требуется вход в личный кабинет")
+    return user
+
+@app.post("/api/auth/register")
+def register(auth: AuthRequest):
+    username = auth.username.strip()
+    if len(username) < 3 or len(username) > 50 or len(auth.password) < 6:
+        raise HTTPException(status_code=400, detail="Логин: 3–50 символов, пароль: минимум 6 символов")
+    conn = sqlite3.connect("inventory.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hash_password(auth.password)))
+        user_id = cursor.lastrowid
+        token = secrets.token_urlsafe(32)
+        cursor.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Такой логин уже занят")
+    conn.close()
+    return {"status": "success", "token": token, "username": username}
+
+@app.post("/api/auth/login")
+def login(auth: AuthRequest):
+    conn = sqlite3.connect("inventory.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (auth.username.strip(),))
+    row = cursor.fetchone()
+    if not row or not verify_password(auth.password, row[2]):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    token = secrets.token_urlsafe(32)
+    cursor.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, row[0]))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "token": token, "username": row[1]}
+
+@app.get("/api/auth/me")
+def me(token: str = ""):
+    user = require_user(token)
+    return {"username": user[1]}
+
+@app.post("/api/auth/logout")
+def logout(token: str = ""):
+    conn = sqlite3.connect("inventory.db")
+    conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
 
 @app.get("/")
 def read_root():

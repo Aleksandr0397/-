@@ -19,8 +19,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DB_PATH = os.environ.get("INVENTORY_DB_PATH", "inventory.db")
+
 def init_db():
-    conn = sqlite3.connect('inventory.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -114,7 +116,7 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 def get_user(token: str):
-    conn = sqlite3.connect("inventory.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ?", (token,))
     row = cursor.fetchone()

@@ -18,13 +18,20 @@
         .sell-btn:hover { background-color: #0044cc; }
         .error { color: #b00020; margin-top: 10px; font-weight: bold; }
         .info { color: #444; margin-top: 10px; }
+        .admin-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 1000; }
+        .admin-modal-content { background: #fff; width: min(1100px, 100%); max-height: 90vh; overflow-y: auto; border-radius: 12px; padding: 20px; box-shadow: 0 10px 35px rgba(0,0,0,0.25); }
+        .admin-topbar { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:15px; }
+        .admin-topbar h2 { margin:0; }
+        .admin-close { width:auto; background:#777; padding:8px 14px; }
     </style>
 </head>
 <body>
     <div id="public-site">
         <header style="display:flex;justify-content:space-between;align-items:center;gap:10px">
             <h1>Магазин</h1>
-            <button type="button" onclick="showLogin()" style="width:auto">Личный кабинет администратора</button>
+            <div style="display:flex;gap:8px;align-items:center">
+                <button type="button" onclick="showLogin()" style="width:auto;margin:0;padding:8px 12px">Админ</button>
+            </div>
         </header>
         <div class="panel"><h2>Каталог товаров</h2><div id="public-products">Загрузка...</div></div>
     </div>
@@ -50,11 +57,15 @@
         </div>
     </div>
 
-    <div id="admin-site" style="display:none">
-        <header style="display:flex;justify-content:space-between;align-items:center">
-            <h1>Панель администратора</h1>
-            <button type="button" onclick="logout()" style="width:auto;background:#777">Выйти</button>
-        </header>
+    <div id="admin-site" class="admin-modal" style="display:none" onclick="if(event.target===this) closeAdminPanel()">
+        <div class="admin-modal-content">
+        <div class="admin-topbar">
+            <h2>Панель администратора</h2>
+            <div style="display:flex;gap:8px">
+                <button type="button" onclick="logout()" style="width:auto;background:#777;padding:8px 14px">Выйти</button>
+                <button type="button" onclick="closeAdminPanel()" class="admin-close">Закрыть</button>
+            </div>
+        </div>
 
         <div class="container">
             <div class="panel">
@@ -104,6 +115,7 @@
                 <tbody id="product-list"></tbody>
             </table>
         </div>
+        </div>
     </div>
 
     <script>
@@ -114,6 +126,11 @@
             return authToken
                 ? {"Authorization":"Bearer " + authToken, "Content-Type":"application/json"}
                 : {"Content-Type":"application/json"};
+        }
+
+        function closeAdminPanel() {
+            document.getElementById("admin-site").style.display="none";
+            showPublic();
         }
 
         function showPublic() {
@@ -274,9 +291,9 @@
                 }
                 authToken=data.token;
                 localStorage.setItem("admin_token",authToken);
-                document.getElementById("public-site").style.display="none";
+                document.getElementById("public-site").style.display="block";
                 document.getElementById("login-site").style.display="none";
-                document.getElementById("admin-site").style.display="block";
+                document.getElementById("admin-site").style.display="flex";
                 loadProducts();
             } catch(error) {
                 errorBox.textContent="Сайт не смог связаться с сервером. После обновления Render попробуйте ещё раз.";
@@ -284,7 +301,7 @@
         });
 
         if(authToken){
-            document.getElementById("admin-site").style.display="block";
+            document.getElementById("admin-site").style.display="flex";
             document.getElementById("public-site").style.display="none";
             loadProducts();
         } else {

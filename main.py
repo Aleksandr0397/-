@@ -76,6 +76,35 @@ def init_db():
             price REAL
         )
     ''')
+    # One-time migration from an existing local SQLite database, when available.
+    if DATABASE_URL and os.path.exists(DB_PATH):
+        sqlite_conn = sqlite3.connect(DB_PATH)
+        sqlite_cur = sqlite_conn.cursor()
+        try:
+            old_users = sqlite_cur.execute("SELECT id, username, password_hash, created_at FROM users").fetchall()
+            user_map = {}
+            for row in old_users:
+                execute(cursor, "INSERT INTO users (id, username, password_hash, created_at) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING", row)
+            for row in old_users:
+                target = execute(cursor, "SELECT id FROM users WHERE username = %s", (row[1],)).fetchone()
+                if target:
+                    user_map[row[0]] = target[0]
+            old_sessions = sqlite_cur.execute("SELECT token, user_id, created_at FROM sessions").fetchall()
+            for token, old_user_id, created_at in old_sessions:
+                if old_user_id in user_map:
+                    execute(cursor, "INSERT INTO sessions (token, user_id, created_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (token, user_map[old_user_id], created_at))
+            old_settings = sqlite_cur.execute("SELECT key, value FROM app_settings").fetchall()
+            for row in old_settings:
+                execute(cursor, "INSERT INTO app_settings (key, value) VALUES (%s, %s) ON CONFLICT DO NOTHING", row)
+            old_products = sqlite_cur.execute("SELECT id, code, name, category, stock, price FROM products").fetchall()
+            for row in old_products:
+                execute(cursor, "INSERT INTO products (id, code, name, category, stock, price) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING", row)
+            execute(cursor, "SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1), true)")
+            execute(cursor, "SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products), 1), true)")
+            conn.commit()
+        finally:
+            sqlite_conn.close()
+
     # One-time migration for the initial administrator.
     initialized = execute(cursor, "SELECT value FROM app_settings WHERE key = 'default_admin_initialized'").fetchone()
     if not initialized:

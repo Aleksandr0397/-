@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import sqlite3
 import requests
 import uuid
@@ -39,12 +39,15 @@ class Product(BaseModel):
     code: str
     name: str
     category: str
-    stock: int
-    price: float
+    stock: int = Field(ge=0)
+    price: float = Field(gt=0)
 
 class SaleItem(BaseModel):
     code: str
-    quantity: int
+    quantity: int = Field(gt=0)
+
+class StockUpdate(BaseModel):
+    stock: int = Field(ge=0)
 
 class SaleRequest(BaseModel):
     items: list[SaleItem]
@@ -80,6 +83,19 @@ def add_product(product: Product):
         raise HTTPException(status_code=400, detail="Товар с таким артикулом уже существует")
     conn.close()
     return {"status": "success"}
+
+@app.put("/api/products/{product_id}/stock")
+def update_stock(product_id: int, update: StockUpdate):
+    conn = sqlite3.connect("inventory.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM products WHERE id = ?", (product_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Товар не найден")
+    cursor.execute("UPDATE products SET stock = ? WHERE id = ?", (update.stock, product_id))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "stock": update.stock}
 
 @app.post("/api/sell")
 def make_sale(sale: SaleRequest, atol_web_url: str = "http://localhost:16732"):

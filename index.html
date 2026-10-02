@@ -62,6 +62,7 @@
                     <th>Категория</th>
                     <th>Остаток</th>
                     <th>Цена</th>
+                    <th>Изменить остаток</th>
                 </tr>
             </thead>
             <tbody id="product-list">
@@ -91,6 +92,7 @@
                         <td>${p.category}</td>
                         <td><b>${p.stock}</b></td>
                         <td>${p.price} ₽</td>
+                        <td><input type="number" min="0" value="${p.stock}" id="stock-${p.id}" style="width:90px"><button type="button" onclick="updateStock(${p.id})" style="width:auto;margin-left:5px">Сохранить</button></td>
                     `;
                     tbody.appendChild(tr);
                 });
@@ -126,13 +128,40 @@
             }
         });
 
+        async function updateStock(id) {
+            const input = document.getElementById("stock-" + id);
+            const stock = parseInt(input.value, 10);
+            if (!Number.isInteger(stock) || stock < 0) {
+                alert("Количество должно быть целым числом не меньше 0");
+                return;
+            }
+            const response = await fetch(API_URL + "/api/products/" + id + "/stock", {
+                method: "PUT",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({stock})
+            });
+            if (response.ok) {
+                alert("Остаток обновлён");
+                loadProducts();
+            } else {
+                const err = await response.json();
+                alert("Ошибка изменения остатка: " + (err.detail || "неизвестная ошибка"));
+            }
+        }
+
         // Обработка формы продажи (касса)
         document.getElementById('sell-form').addEventListener('submit', async (e) => {
             e.preventDefault();
+            const quantity = parseInt(document.getElementById("sell-quantity").value, 10);
+            if (!Number.isInteger(quantity) || quantity <= 0) {
+                alert("Количество для продажи должно быть целым числом больше 0");
+                return;
+            }
+
             const sale = {
                 items: [{
                     code: document.getElementById('sell-code').value,
-                    quantity: parseInt(document.getElementById('sell-quantity').value)
+                    quantity
                 }],
                 payment_type: document.getElementById('sell-payment').value
             };

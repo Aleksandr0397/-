@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import sqlite3
+import psycopg
 import requests
 import uuid
 import os
@@ -19,7 +20,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 DB_PATH = os.environ.get("INVENTORY_DB_PATH", "/var/data/inventory.db" if os.path.isdir("/var/data") else "inventory.db")
+
+def get_conn():
+    return psycopg.connect(DATABASE_URL) if DATABASE_URL else get_conn()
+
+def execute(conn, query, params=()):
+    return execute(conn, query.replace("?", "%s") if DATABASE_URL else query, params)
+
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -37,9 +46,9 @@ def verify_password(password: str, stored: str) -> bool:
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
+    execute(cursor, '''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -80,8 +89,8 @@ def init_db():
             if first_user:
                 cursor.execute("UPDATE users SET username = 'admin', password_hash = ? WHERE id = ?", (hash_password(initial_password), first_user[0]))
             else:
-                cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ("admin", hash_password(initial_password)))
-        cursor.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('default_admin_initialized', '1')")
+                execute(cursor, "INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id", ("admin", hash_password(initial_password)))
+        cursor.execute("INSERT INTO app_settings (key, value) VALUES ('default_admin_initialized', '1') ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value")
     conn.commit()
     conn.close()
 
@@ -140,8 +149,8 @@ def register(auth: AuthRequest):
         raise HTTPException(status_code=400, detail="Логин: 3–50 символов, пароль: минимум 4 символа")
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hash_password(auth.password)))
-        user_id = cursor.lastrowid
+        execute(cursor, "INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id", (username, hash_password(auth.password)))
+        user_id = execute(cursor, "SELECT id FROM users WHERE username = ?", (username,)).fetchone()[0]
         token = secrets.token_urlsafe(32)
         cursor.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
         conn.commit()
@@ -227,7 +236,7 @@ def add_product(product: Product, authorization: str | None = Header(default=Non
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
-        cursor.execute(
+        execute(cursor,
             "INSERT INTO products (code, name, category, stock, price) VALUES (?, ?, ?, ?, ?)",
             (product.code, product.name, product.category, product.stock, product.price)
         )

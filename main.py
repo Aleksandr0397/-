@@ -38,6 +38,12 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT UNIQUE,
@@ -47,12 +53,30 @@ def init_db():
             price REAL
         )
     ''')
+    # One-time migration for the initial administrator.
+    initialized = cursor.execute("SELECT value FROM app_settings WHERE key = 'default_admin_initialized'").fetchone()
+    if not initialized:
+        initial_password = "0" * 4
+        admin = cursor.execute("SELECT id FROM users WHERE username = 'admin' LIMIT 1").fetchone()
+        if admin:
+            cursor.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(initial_password), admin[0]))
+        else:
+            first_user = cursor.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+            if first_user:
+                cursor.execute("UPDATE users SET username = 'admin', password_hash = ? WHERE id = ?", (hash_password(initial_password), first_user[0]))
+            else:
+                cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ("admin", hash_password(initial_password)))
+        cursor.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('default_admin_initialized', '1')")
     conn.commit()
     conn.close()
 
 init_db()
 
 class AuthRequest(BaseModel):
+    username: str
+    password: str
+
+class CredentialsChangeRequest(BaseModel):
     username: str
     password: str
 
@@ -110,8 +134,8 @@ def register(auth: AuthRequest):
         conn.close()
         raise HTTPException(status_code=403, detail="Администратор уже создан")
     username = auth.username.strip()
-    if len(username) < 3 or len(username) > 50 or len(auth.password) < 6:
-        raise HTTPException(status_code=400, detail="Логин: 3–50 символов, пароль: минимум 6 символов")
+    if len(username) < 3 or len(username) > 50 or len(auth.password) < 4:
+        raise HTTPException(status_code=400, detail="Логин: 3–50 символов, пароль: минимум 4 символа")
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hash_password(auth.password)))
@@ -144,6 +168,25 @@ def login(auth: AuthRequest):
 def me(token: str = ""):
     user = require_user(token)
     return {"username": user[1]}
+
+@app.put("/api/auth/credentials")
+def change_credentials(data: CredentialsChangeRequest, authorization: str | None = Header(default=None)):
+    token = authorization.replace("Bearer ", "", 1) if authorization else ""
+    user = require_user(token)
+    username = data.username.strip()
+    if len(username) < 3 or len(username) > 50:
+        raise HTTPException(status_code=400, detail="Логин должен содержать от 3 до 50 символов")
+    if len(data.password) < 4:
+        raise HTTPException(status_code=400, detail="Пароль должен содержать минимум 4 символа")
+    conn = sqlite3.connect("inventory.db")
+    try:
+        conn.execute("UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (username, hash_password(data.password), user[0]))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Такой логин уже занят")
+    conn.close()
+    return {"status": "success", "username": username}
 
 @app.post("/api/auth/logout")
 def logout(token: str = ""):

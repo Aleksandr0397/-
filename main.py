@@ -159,7 +159,14 @@ def read_root():
         return FileResponse("index.html")
     return {"message": "index.html не найден"}
 
-@app.get("/api/public/products")\ndef get_public_products():\n    conn = sqlite3.connect("inventory.db")\n    rows = conn.execute("SELECT id, code, name, category, stock, price FROM products").fetchall()\n    conn.close()\n    return [{"id": r[0], "code": r[1], "name": r[2], "category": r[3], "stock": r[4], "price": r[5]} for r in rows]\n\n@app.get("/api/products")
+@app.get("/api/public/products")
+def get_public_products():
+    conn = sqlite3.connect("inventory.db")
+    rows = conn.execute("SELECT id, code, name, category, stock, price FROM products").fetchall()
+    conn.close()
+    return [{"id": r[0], "code": r[1], "name": r[2], "category": r[3], "stock": r[4], "price": r[5]} for r in rows]
+
+@app.get("/api/products")
 def get_products(authorization: str | None = Header(default=None)):
     require_user(authorization.replace("Bearer ", "", 1) if authorization else "")
     conn = sqlite3.connect('inventory.db')

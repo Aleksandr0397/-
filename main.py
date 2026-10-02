@@ -68,7 +68,7 @@ def init_db():
     ''')
     execute(cursor, f'''
         CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
+            id {ID_DEF},
             code TEXT UNIQUE,
             name TEXT,
             category TEXT,

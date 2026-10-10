@@ -14,10 +14,10 @@ export async function createBackupManifest(parts: Record<string, Uint8Array>): P
 export function parseBackupManifest(raw: string): BackupManifest {
   let value;
   try { value = JSON.parse(raw); } catch { throw new InputError("Повреждён список файлов резервной копии."); }
-  if (value?.format !== "inventory-atoll-archive" || value.version !== 1 || !Array.isArray(value.entries) || value.entries.length > 501) throw new InputError("Неизвестный формат списка файлов копии.");
+  if (value?.format !== "inventory-atoll-archive" || value.version !== 1 || !Array.isArray(value.entries) || value.entries.length > 150501) throw new InputError("Неизвестный формат списка файлов копии.");
   const paths = new Set<string>();
   for (const entry of value.entries) {
-    if (!entry || typeof entry.path !== "string" || !/^(backup\.json|files\/[A-Za-z0-9:_-]{1,80})$/.test(entry.path) || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 16000000 || !/^[a-f0-9]{64}$/.test(entry.sha256) || paths.has(entry.path)) throw new InputError("Неверный список файлов резервной копии.");
+    if (!entry || typeof entry.path !== "string" || !/^(backup\.json|(?:files|photos)\/[A-Za-z0-9:_-]{1,80})$/.test(entry.path) || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 16000000 || !/^[a-f0-9]{64}$/.test(entry.sha256) || paths.has(entry.path)) throw new InputError("Неверный список файлов резервной копии.");
     paths.add(entry.path);
   }
   if (!paths.has("backup.json")) throw new InputError("В списке файлов нет backup.json.");

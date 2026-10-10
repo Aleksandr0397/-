@@ -7,17 +7,19 @@ import { integrationStatus, previewCatalogue, type IntegrationEnv, type Provider
 import sourceSnapshot from "./source-snapshot.json";
 import { supplierApi, supplierForPrice, supplierVisible, linkLegacySuppliers } from "./suppliers";
 import { orderSettings, saveOrderSettings, type OrderSettingsEnv } from "./shop-settings";
+import { productPhotoApi, photoProjection } from "./product-photos";
+import { photoUrl } from "../lib/product-photos";
 
 type Identity = { userId: string; email: string; displayName: string };
 type Bindings = { DB?: D1Database; BUCKET?: R2Bucket } & IntegrationEnv & OrderSettingsEnv;
 type Customer = { id: string; auth_user_id: string | null; email: string; name: string; role: string; discount_bps: number; markup_bps: number; created_at: string };
-type Product = { id: string; import_id: string; code: string; brand: string; name: string; stock: number | null; price_cents: number; source_name: string; source_type: string; lead_days: number | null; warehouse: string; bin: string; min_stock: number };
+type Product = { id: string; import_id: string; code: string; brand: string; name: string; stock: number | null; price_cents: number; source_name: string; source_type: string; lead_days: number | null; warehouse: string; bin: string; min_stock: number; photo_id?: string | null; photo_count?: number };
 type Order = { id: string; customer_id: string; idempotency_key: string; total_cents: number; status: string; comment: string; created_at: string; customer_name?: string; customer_email?: string };
 const now = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
 const activeImports = "SELECT value FROM settings WHERE key LIKE 'active_import:%'";
-const productSelect = "SELECT p.*,i.source_name,i.source_type,i.lead_days FROM products p JOIN imports i ON i.id=p.import_id";
-const offer = (p: Product, me: Customer | null) => ({ id: p.id, code: p.code, brand: p.brand, name: p.name, stock: p.stock, priceCents: customerPrice(p.price_cents, me?.discount_bps ?? 0, me?.markup_bps ?? 0), sourceName: p.source_type === "warehouse" ? p.source_name : "Поставщик", sourceType: p.source_type, leadDays: p.lead_days, ...(me?.role === "admin" ? { sourceName: p.source_name, warehouse: p.warehouse || p.source_name, bin: p.bin, minStock: p.min_stock, basePriceCents: p.price_cents } : {}) });
+const productSelect = "SELECT p.*,i.source_name,i.source_type,i.lead_days" + photoProjection + " FROM products p JOIN imports i ON i.id=p.import_id";
+const offer = (p: Product, me: Customer | null) => ({ id: p.id, code: p.code, brand: p.brand, name: p.name, stock: p.stock, priceCents: customerPrice(p.price_cents, me?.discount_bps ?? 0, me?.markup_bps ?? 0), sourceName: p.source_type === "warehouse" ? p.source_name : "Поставщик", sourceType: p.source_type, leadDays: p.lead_days, photoUrl: p.photo_id ? photoUrl(p.photo_id) : null, photoCount: p.photo_count ?? 0, ...(me?.role === "admin" ? { sourceName: p.source_name, warehouse: p.warehouse || p.source_name, bin: p.bin, minStock: p.min_stock, basePriceCents: p.price_cents } : {}) });
 const json = (v: unknown, status = 200) => Response.json(v, { status, headers: { "Cache-Control": "no-store" } });
 async function all<T>(db: D1Database, sql: string, ...values: (string | number | null)[]): Promise<T[]> {
   return (await db.prepare(sql).bind(...values).all<T>()).results;
@@ -76,6 +78,9 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       if (origin && origin !== url.origin) throw new InputError("Запрос должен исходить с этого сайта.", 403);
     }
     const me = user ? await currentCustomer(db, user) : null;
+    if (/^\/api\/products\/[^/]+\/photos(?:\/[^/]+)?$/.test(path) || path.startsWith("/api/product-photos/")) {
+      return await productPhotoApi(request, db, env.BUCKET, me?.role === "admin");
+    }
     if (path === "/api/suppliers" || path.startsWith("/api/suppliers/")) {
       admin(me); return await supplierApi(request, db);
     }
@@ -326,7 +331,7 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       await linkLegacySuppliers(db);
       const tables = backupTables;
       const records = await db.batch(tables.map(table => db.prepare(table === "customers" ? "SELECT id,email,name,role,discount_bps,markup_bps,created_at FROM customers" : "SELECT * FROM " + table)));
-      const dump: Record<string, unknown> = { format: "inventory-atoll", version: 3, exportedAt: now(), ...Object.fromEntries(tables.map((table, index) => [table, records[index].results])) };
+      const dump: Record<string, unknown> = { format: "inventory-atoll", version: 4, exportedAt: now(), ...Object.fromEntries(tables.map((table, index) => [table, records[index].results])) };
       return json(dump);
     }
     if (path === "/api/restore" && method === "POST") {

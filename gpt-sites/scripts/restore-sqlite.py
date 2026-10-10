@@ -15,7 +15,7 @@ import sqlite3
 import tempfile
 import zipfile
 
-TABLES = ["customers", "suppliers", "imports", "products", "orders", "order_items", "vin_requests",
+TABLES = ["customers", "suppliers", "imports", "products", "product_photos", "orders", "order_items", "vin_requests",
           "topups", "ledger", "stock_movements", "purchase_runs", "purchase_orders",
           "purchase_order_items", "purchase_receipts", "purchase_receipt_items", "settings"]
 DEFAULTS = {
@@ -35,16 +35,16 @@ def load_archive(path):
     require(path.is_file() and path.stat().st_size <= 64_000_000, "Archive missing or larger than 64 MB.")
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
-        require(len(infos) <= 1002, "Archive contains too many files.")
+        require(len(infos) <= 150502, "Archive contains too many files.")
         require(len({i.filename for i in infos}) == len(infos), "Duplicate archive paths.")
         require(sum(i.file_size for i in infos) <= 80_000_000, "Expanded archive exceeds 80 MB.")
         require(all(i.file_size <= 16_000_000 for i in infos), "An archive entry exceeds 16 MB.")
         require("backup.json" in archive.namelist(), "Missing backup.json.")
         raw = archive.read("backup.json")
         data = json.loads(raw)
-        require(data.get("format") == "inventory-atoll" and type(data.get("version")) is int and data["version"] in (1, 2, 3), "Unsupported backup format.")
+        require(data.get("format") == "inventory-atoll" and type(data.get("version")) is int and data["version"] in (1, 2, 3, 4), "Unsupported backup format.")
         for table in TABLES:
-            if table.startswith("purchase_") or table == "suppliers" and data["version"] < 3:
+            if table.startswith("purchase_") or table == "suppliers" and data["version"] < 3 or table == "product_photos" and data["version"] < 4:
                 data.setdefault(table, [])
             require(isinstance(data.get(table), list) and all(isinstance(row, dict) for row in data[table]), "Invalid table: " + table)
             if table != "settings":
@@ -56,6 +56,11 @@ def load_archive(path):
                 require(name in archive.namelist(), "Missing price file: " + name)
                 require(archive.getinfo(name).file_size <= 8_000_000, "A price file exceeds 8 MB.")
                 parts[name] = archive.read(name)
+        for record in data["product_photos"]:
+            name = "photos/" + record["id"]
+            require(name in archive.namelist(), "Missing photo file: " + name)
+            require(type(record.get("size_bytes")) is int and 0 < record["size_bytes"] <= 3_000_000 and archive.getinfo(name).file_size == record["size_bytes"], "Invalid photo file size: " + name)
+            parts[name] = archive.read(name)
         manifest = None
         if "manifest.json" in archive.namelist():
             manifest = json.loads(archive.read("manifest.json"))
@@ -67,7 +72,7 @@ def load_archive(path):
             for entry in entries:
                 value = parts[entry["path"]]
                 require(entry.get("size") == len(value) and entry.get("sha256") == hashlib.sha256(value).hexdigest(), "Checksum mismatch: " + entry["path"])
-        require(data["version"] < 2 or manifest is not None, "Version 2/3 requires manifest.json.")
+        require(data["version"] < 2 or manifest is not None, "Version 2/3/4 requires manifest.json.")
         require(data["version"] < 3 or all(record.get("supplier_id") for record in data["imports"] if record.get("source_type") == "supplier"), "A supplier price is missing its supplier ID.")
         return data, parts, manifest is not None
 
@@ -110,6 +115,10 @@ def restore(archive_path, destination, migrations):
                 if table == "imports" and row.get("file_key"):
                     filename = hashlib.sha256(row["id"].encode()).hexdigest()
                     (files_dir / filename).write_bytes(parts["files/" + row["id"]])
+                    row["file_key"] = "files/" + filename
+                if table == "product_photos":
+                    filename = "photo-" + hashlib.sha256(row["id"].encode()).hexdigest()
+                    (files_dir / filename).write_bytes(parts["photos/" + row["id"]])
                     row["file_key"] = "files/" + filename
                 fields = [key for key in row if key in columns]
                 require(fields, "An empty row was found in " + table)

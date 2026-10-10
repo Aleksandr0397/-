@@ -11,6 +11,7 @@ const root = process.cwd();
 const require = createRequire(realpathSync(join(root, "node_modules/wrangler/package.json")));
 const { build } = require("esbuild");
 const { Miniflare, Log, LogLevel } = require("miniflare");
+const sharp = createRequire(require.resolve("miniflare"))("sharp");
 const directory = join(root, ".sites-runtime/verification", crypto.randomUUID());
 await mkdir(directory, { recursive: true });
 const bundle = join(directory, "worker.mjs");
@@ -21,7 +22,7 @@ await build({
         const userId = request.headers.get("x-test-user");
         const user = userId ? { userId, email: request.headers.get("x-test-email"), displayName: userId } : null;
         const hostname = new URL(request.url).hostname;
-        const DB = hostname === "legacyrestore.atoll.test" ? env.LEGACY_RESTORE_DB : hostname === "restore.atoll.test" ? env.RESTORE_DB : env.DB;
+        const DB = hostname === "v1restore.atoll.test" ? env.V1_RESTORE_DB : hostname === "v3restore.atoll.test" ? env.V3_RESTORE_DB : hostname === "legacyrestore.atoll.test" ? env.LEGACY_RESTORE_DB : hostname === "restore.atoll.test" ? env.RESTORE_DB : env.DB;
         let queries = 0;
         const statements = new WeakMap();
         function count(n = 1) { queries += n; if (queries > 50) throw new Error("Verification: D1 query budget exceeded"); }
@@ -45,7 +46,7 @@ await build({ stdin: { contents: 'export { checkoutAttempt, pendingCheckout, com
 const { checkoutAttempt, pendingCheckout, completeCheckout, previewCatalogue, mutationAttempt, pendingMutation, completeMutation, createBackupManifest, linkLegacySuppliers } = await import(pathToFileURL(helpersBundle).href);
 const options = {
   modules: true, scriptPath: bundle, compatibilityDate: "2026-05-01", cf: false,
-  log: new Log(LogLevel.ERROR), d1Databases: { DB: "test-atoll", RESTORE_DB: "test-restore", LEGACY_RESTORE_DB: "test-legacy-restore", UPGRADE_DB: "test-upgrade" },
+  log: new Log(LogLevel.ERROR), d1Databases: { DB: "test-atoll", RESTORE_DB: "test-restore", LEGACY_RESTORE_DB: "test-legacy-restore", V1_RESTORE_DB: "test-v1-restore", V3_RESTORE_DB: "test-v3-restore", UPGRADE_DB: "test-upgrade" },
   r2Buckets: ["BUCKET"], d1Persist: join(directory, "d1"), r2Persist: join(directory, "r2"),
 };
 let runtime = new Miniflare(options);
@@ -64,7 +65,7 @@ async function api(path, { user = owner, method = "GET", body, restore = false }
     headers["content-type"] = serialized.headers.get("content-type");
     body = await serialized.arrayBuffer();
   } else if (body) { headers["content-type"] = "application/json"; body = JSON.stringify(body); }
-  const response = await runtime.dispatchFetch("http://" + (restore === "legacy" ? "legacyrestore" : restore ? "restore" : "app") + ".atoll.test" + path, { method, headers, body });
+  const response = await runtime.dispatchFetch("http://" + (restore === "v1" ? "v1restore" : restore === "v3" ? "v3restore" : restore === "legacy" ? "legacyrestore" : restore ? "restore" : "app") + ".atoll.test" + path, { method, headers, body });
   const raw = await response.text();
   let data; try { data = JSON.parse(raw); } catch { data = raw; }
   return { status: response.status, data, queries: Number(response.headers.get("x-test-queries")) };
@@ -92,9 +93,16 @@ const priceRows = [
 ];
 let product, adminId, customerId, order, saleId;
 let purchase, purchaseGoods;
+const photoBytes = new Uint8Array(await sharp({ create: { width: 1, height: 1, channels: 3, background: '#447799' } }).png().toBuffer());
+await sharp(photoBytes).raw().toBuffer(); // Positive fixture must decode, not just have a PNG header.
+async function uploadPhoto(productId, bytes = photoBytes, user = owner) {
+  const form = new FormData(); form.set("file", new Blob([bytes], { type: "image/png" }), "part.png");
+  return api("/api/products/" + productId + "/photos", { method: "POST", body: form, user });
+}
+let savedPhoto;
 try {
   await check("Все SQL-миграции применяются к пустой настоящей D1", async () => {
-    for (const binding of ["DB", "RESTORE_DB", "LEGACY_RESTORE_DB"]) {
+    for (const binding of ["DB", "RESTORE_DB", "LEGACY_RESTORE_DB", "V1_RESTORE_DB", "V3_RESTORE_DB"]) {
       const db = await runtime.getD1Database(binding);
       for (const file of (await readdir(join(root, "drizzle"))).filter(x => x.endsWith(".sql")).sort()) {
         const sql = await readFile(join(root, "drizzle", file), "utf8");
@@ -220,6 +228,72 @@ try {
     assert.equal((await api("/api/products?source=supplier")).data.items.length, 1);
   });
   if (!product) throw new Error("Импорт прайса не прошёл; зависимые проверки остановлены.");
+  await check("Фото загружается администратором и появляется в галерее и каталоге клиента", async () => {
+    const created = await uploadPhoto(product.id);
+    assert.equal(created.status, 201, JSON.stringify(created.data)); savedPhoto = created.data.photo;
+    const gallery = await api("/api/products/" + product.id + "/photos", { user: client });
+    assert.equal(gallery.status, 200); assert.equal(gallery.data.photos[0].id, savedPhoto.id);
+    const offer = (await api("/api/products?q=001-A", { user: client })).data.items.find(p => p.id === product.id);
+    assert.equal(offer.photoUrl, savedPhoto.url); assert.equal(offer.photoCount, 1);
+    const response = await runtime.dispatchFetch("http://app.atoll.test" + savedPhoto.url);
+    assert.equal(response.status, 200); assert.equal(response.headers.get("content-type"), "image/png");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), photoBytes);
+  });
+  await check("Фото защищено от клиента, SVG, подмены MIME, больших и повреждённых файлов", async () => {
+    assert.equal((await uploadPhoto(product.id, photoBytes, client)).status, 403);
+    assert.equal((await uploadPhoto(product.id, photoBytes, null)).status, 403);
+    for (const bytes of [new TextEncoder().encode('<svg onload="alert(1)"/>'), new TextEncoder().encode('<html>not a photo</html>'), photoBytes.slice(0, 30)]) assert.equal((await uploadPhoto(product.id, bytes)).status, 400);
+    const corruptPng = photoBytes.slice(); corruptPng[corruptPng.length - 1] ^= 1;
+    assert.equal((await uploadPhoto(product.id, corruptPng)).status, 400);
+    assert.equal((await uploadPhoto(product.id, new Uint8Array(3_000_001))).status, 413);
+    const huge = await sharp({ create: { width: 8000, height: 1, channels: 3, background: '#447799' } }).png().toBuffer();
+    const oversized = await uploadPhoto(product.id, huge); assert.equal(oversized.status, 400); assert.match(oversized.data.error, /6000/);
+    const tooManyPixels = await sharp({ create: { width: 5000, height: 5000, channels: 3, background: '#447799' } }).png().toBuffer();
+    const pixels = await uploadPhoto(product.id, tooManyPixels); assert.equal(pixels.status, 400); assert.match(pixels.data.error, /24 мегапикселей/);
+    assert.equal((await uploadPhoto("missing-product")).status, 404);
+    assert.equal((await api("/api/products/" + product.id + "/photos/" + savedPhoto.id, { user: client, method: "DELETE" })).status, 403);
+    assert.equal((await api("/api/products/" + product.id + "/photos")).data.photos.length, 1);
+  });
+  await check("JPEG и оба вида WebP распознаются по содержимому с правильными размерами", async () => {
+    const source = sharp({ create: { width: 16, height: 12, channels: 3, background: '#447799' } });
+    for (const [bytes, type] of [[await source.clone().jpeg().toBuffer(), 'image/jpeg'], [await source.clone().webp().toBuffer(), 'image/webp'], [await source.clone().webp({ lossless: true }).toBuffer(), 'image/webp']]) {
+      const form = new FormData(); form.set('file', new Blob([bytes], { type: 'application/octet-stream' }), 'unknown.bin');
+      const uploaded = await api('/api/products/' + product.id + '/photos', { method: 'POST', body: form });
+      assert.equal(uploaded.status, 201, JSON.stringify(uploaded.data)); assert.equal(uploaded.data.photo.width, 16); assert.equal(uploaded.data.photo.height, 12);
+      const response = await runtime.dispatchFetch('http://app.atoll.test' + uploaded.data.photo.url);
+      assert.equal(response.headers.get('content-type'), type); assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array(bytes));
+      assert.equal((await api('/api/products/' + product.id + '/photos/' + uploaded.data.photo.id, { method: 'DELETE' })).status, 200);
+    }
+  });
+  await check("Две одновременные загрузки пятого фото не превышают лимит и не оставляют лишний файл", async () => {
+    for (let n = 0; n < 3; n++) assert.equal((await uploadPhoto(product.id)).status, 201);
+    const results = await Promise.all([uploadPhoto(product.id), uploadPhoto(product.id)]);
+    assert.deepEqual(results.map(r => r.status).sort(), [201, 409]);
+    assert.equal((await uploadPhoto(product.id)).status, 409);
+    const gallery = (await api('/api/products/' + product.id + '/photos')).data.photos;
+    assert.equal(gallery.length, 5);
+    const bucket = await runtime.getR2Bucket('BUCKET');
+    assert.equal((await bucket.list({ prefix: 'product-photos/' })).objects.length, 5);
+    for (const photo of gallery.filter(x => x.id !== savedPhoto.id)) {
+      assert.equal((await api('/api/products/' + product.id + '/photos/' + photo.id, { method: 'DELETE' })).status, 200);
+      assert.equal((await api('/api/products/' + product.id + '/photos/' + photo.id, { method: 'DELETE' })).status, 200);
+      assert.equal((await runtime.dispatchFetch('http://app.atoll.test' + photo.url)).status, 404);
+    }
+    assert.equal((await bucket.list({ prefix: 'product-photos/' })).objects.length, 1);
+  });
+  await check("Отключение поставщика скрывает его фото у клиента, сохраняя доступ администратора", async () => {
+    const supplier = (await api('/api/suppliers')).data.suppliers.find(s => s.name === 'Поставщик №1');
+    const goods = (await api('/api/products?q=001-A')).data.items.find(p => p.sourceType === 'supplier');
+    const created = await uploadPhoto(goods.id); assert.equal(created.status, 201);
+    const disable = await api('/api/suppliers/' + supplier.id, { method: 'PATCH', body: { enabled: false, expectedRevision: supplier.revision } }); assert.equal(disable.status, 200);
+    assert.equal((await api('/api/products/' + goods.id + '/photos', { user: client })).status, 404);
+    assert.equal((await runtime.dispatchFetch('http://app.atoll.test' + created.data.photo.url)).status, 404);
+    assert.equal((await api('/api/products/' + goods.id + '/photos')).data.photos.length, 1);
+    const adminRead = await runtime.dispatchFetch('http://app.atoll.test' + created.data.photo.url, { headers: { 'x-test-user': owner.id, 'x-test-email': owner.email } }); assert.equal(adminRead.status, 200);
+    assert.equal((await api('/api/suppliers/' + supplier.id, { method: 'PATCH', body: { enabled: true, expectedRevision: disable.data.supplier.revision } })).status, 200);
+    assert.equal((await runtime.dispatchFetch('http://app.atoll.test' + created.data.photo.url)).status, 200);
+  });
   await check("Индивидуальная наценка 25% даёт 125 рублей и защищена от клиента", async () => {
     assert.equal((await api("/api/customers/" + customerId, { method: "PATCH", body: { markupBps: 2500 } })).status, 200);
     const offers = await api("/api/products?q=001-A", { user: client });
@@ -283,6 +357,7 @@ try {
     await importPrice([{ ...priceRows[0], priceCents: 12000, stock: 10 }, priceRows[1]], "Основной склад", "warehouse", "physical");
     const updated = (await api("/api/products?q=001-A")).data.items.find(x => x.sourceType === "warehouse");
     assert.equal(updated.id, product.id); assert.equal(updated.stock, 9); assert.equal(updated.priceCents, 12000);
+    assert.equal(updated.photoUrl, savedPhoto.url); assert.equal(updated.photoCount, 1);
     const oldOrder = (await api("/api/orders", { user: client })).data.orders.find(x => x.id === reserve.data.order.id);
     assert.equal(oldOrder.items[0].unit_price_cents, 12500);
     await api("/api/orders/" + oldOrder.id, { method: "PATCH", body: { status: "cancelled" } });
@@ -435,13 +510,15 @@ try {
   });
   await check("Данные, закупки, приёмки и файлы восстанавливаются в новую D1", async () => {
     const backup = (await api("/api/backup")).data;
+    assert.equal(backup.version, 4); assert.ok(backup.product_photos.length > 0);
     const restoredOwner = await api("/api/me", { restore: true }); assert.equal(restoredOwner.data.user.role, "admin");
     const raw = JSON.stringify(backup), parts = { "backup.json": new TextEncoder().encode(raw) };
     const form = new FormData(); form.set("data", raw);
     const bucket = await runtime.getR2Bucket("BUCKET");
     for (const record of backup.imports) if (record.file_key) { const bytes = new Uint8Array(await (await bucket.get(record.file_key)).arrayBuffer()); form.set("file:" + record.id, new Blob([bytes]), record.filename); parts["files/" + record.id] = bytes; }
+    for (const record of backup.product_photos) { const bytes = new Uint8Array(await (await bucket.get(record.file_key)).arrayBuffer()); form.set("photo:" + record.id, new Blob([bytes]), record.filename); parts["photos/" + record.id] = bytes; }
     const manifest = JSON.stringify(await createBackupManifest(parts)); form.set("manifest", manifest);
-    const altered = new FormData(); altered.set("data", raw.replace('"version":3', '"version":1')); altered.set("manifest", manifest);
+    const altered = new FormData(); altered.set("data", raw.replace('"version":4', '"version":1')); altered.set("manifest", manifest);
     const rejected = await api("/api/restore", { restore: true, method: "POST", body: altered });
     assert.equal(rejected.status, 400); assert.match(rejected.data.error, /Контрольная сумма/);
     const corruptFile = new FormData(); for (const [name, value] of form.entries()) corruptFile.set(name, value);
@@ -449,6 +526,15 @@ try {
     corruptFile.set("file:" + firstFile.id, new Blob(["Повреждённый файл"]), firstFile.filename);
     const badFile = await api("/api/restore", { restore: true, method: "POST", body: corruptFile });
     assert.equal(badFile.status, 400); assert.match(badFile.data.error, /Контрольная сумма/);
+    const missingPhoto = new FormData(); for (const [name, value] of form.entries()) missingPhoto.set(name, value);
+    missingPhoto.delete('photo:' + backup.product_photos[0].id);
+    assert.equal((await api('/api/restore', { restore: true, method: 'POST', body: missingPhoto })).status, 400);
+    const corruptPhoto = new FormData(); for (const [name, value] of form.entries()) corruptPhoto.set(name, value);
+    const corruptBytes = parts['photos/' + backup.product_photos[0].id].slice(); corruptBytes[corruptBytes.length - 1] ^= 1;
+    corruptPhoto.set('photo:' + backup.product_photos[0].id, new Blob([corruptBytes]), 'damaged.png');
+    const badPhoto = await api('/api/restore', { restore: true, method: 'POST', body: corruptPhoto });
+    assert.equal(badPhoto.status, 400); assert.match(badPhoto.data.error, /Контрольная сумма/);
+    assert.equal((await runtime.getD1Database('RESTORE_DB').then(db => db.prepare('SELECT COUNT(*) AS n FROM product_photos').first())).n, 0);
     const restore = await api("/api/restore", { restore: true, method: "POST", body: form });
     assert.equal(restore.status, 200, JSON.stringify(restore.data));
     const copied = (await api("/api/backup", { restore: true })).data;
@@ -456,6 +542,12 @@ try {
     assert.deepEqual(copied.orders.map(x => x.total_cents).sort(), backup.orders.map(x => x.total_cents).sort());
     assert.deepEqual(copied.purchase_orders, backup.purchase_orders); assert.deepEqual(copied.purchase_receipt_items, backup.purchase_receipt_items);
     assert.deepEqual(copied.suppliers, backup.suppliers); assert.equal((await api("/api/shop-settings", { restore: true })).data.orderEmail, "orders@atoll.test");
+    const metadata = rows => rows.map(({ file_key, ...row }) => row).sort((a,b) => a.id.localeCompare(b.id));
+    assert.deepEqual(metadata(copied.product_photos), metadata(backup.product_photos));
+    for (const record of copied.product_photos) {
+      const restoredBytes = new Uint8Array(await (await bucket.get(record.file_key)).arrayBuffer());
+      assert.deepEqual(restoredBytes, parts['photos/' + record.id]);
+    }
     assert.equal((await api("/api/wallet", { restore: true, user: client })).data.balanceCents, 30000);
     assert.equal((await api("/api/restore", { restore: true, method: "POST", body: form })).status, 409);
     parts["manifest.json"] = new TextEncoder().encode(manifest);
@@ -468,14 +560,14 @@ try {
     assert.equal(result.status, 0, result.stderr); const report = JSON.parse(result.stdout); assert.equal(report.checksumsVerified, true);
     const original = JSON.parse(await readFile(join(directory, "expected-backup.json"), "utf8"));
     for (const [table, count] of Object.entries(report.counts)) assert.equal(count, original[table].length, table);
-    const compared = spawnSync("python3", ["-c", "import json,sqlite3,sys,pathlib,hashlib,zipfile; c=sqlite3.connect(sys.argv[1]); d=json.load(open(sys.argv[2])); c.row_factory=sqlite3.Row; tables=['products','orders','order_items','ledger','purchase_order_items','purchase_receipt_items']; actual={t:[dict(r) for r in c.execute('SELECT * FROM '+t)] for t in tables}; assert all(sorted(actual[t],key=lambda r:r['id'])==sorted(d[t],key=lambda r:r['id']) for t in tables); assert c.execute('PRAGMA foreign_key_check').fetchall()==[]; archive=zipfile.ZipFile(sys.argv[3]); directory=pathlib.Path(sys.argv[1]).parent; assert all((directory/r['file_key']).read_bytes()==archive.read('files/'+r['id']) for r in c.execute('SELECT id,file_key FROM imports WHERE file_key IS NOT NULL')); print('identical business rows and file bytes')", join(target, "inventory.db"), join(directory, "expected-backup.json"), join(directory, "verified-backup.zip")], { encoding: "utf8" });
+    const compared = spawnSync("python3", ["-c", "import json,sqlite3,sys,pathlib,hashlib,zipfile; c=sqlite3.connect(sys.argv[1]); d=json.load(open(sys.argv[2])); c.row_factory=sqlite3.Row; tables=['products','orders','order_items','ledger','purchase_order_items','purchase_receipt_items']; actual={t:[dict(r) for r in c.execute('SELECT * FROM '+t)] for t in tables}; assert all(sorted(actual[t],key=lambda r:r['id'])==sorted(d[t],key=lambda r:r['id']) for t in tables); assert c.execute('PRAGMA foreign_key_check').fetchall()==[]; archive=zipfile.ZipFile(sys.argv[3]); directory=pathlib.Path(sys.argv[1]).parent; assert all((directory/r['file_key']).read_bytes()==archive.read('files/'+r['id']) for r in c.execute('SELECT id,file_key FROM imports WHERE file_key IS NOT NULL')); assert all((directory/r['file_key']).read_bytes()==archive.read('photos/'+r['id']) for r in c.execute('SELECT id,file_key FROM product_photos')); print('identical business rows, prices and photos')", join(target, "inventory.db"), join(directory, "expected-backup.json"), join(directory, "verified-backup.zip")], { encoding: "utf8" });
     assert.equal(compared.status, 0, compared.stderr);
     const repeated = spawnSync("python3", ["scripts/restore-sqlite.py", join(directory, "verified-backup.zip"), target], { cwd: root, encoding: "utf8" });
     assert.equal(repeated.status, 1); assert.match(repeated.stderr, /already exists/);
   });
   await check("Копия версии 2 без справочника восстанавливается в D1 и SQLite, затем поставщики связываются", async () => {
     const backup = JSON.parse(await readFile(join(directory, "expected-backup.json"), "utf8"));
-    backup.version = 2; delete backup.suppliers;
+    backup.version = 2; delete backup.suppliers; delete backup.product_photos;
     const imports = new Map(backup.imports.map(i => [i.id, i]));
     for (const setting of backup.settings) {
       const record = imports.get(setting.value);
@@ -483,6 +575,7 @@ try {
     }
     for (const record of backup.imports) delete record.supplier_id;
     const parts = unzipSync(new Uint8Array(await readFile(join(directory, "verified-backup.zip")))); delete parts["manifest.json"];
+    for (const name of Object.keys(parts)) if (name.startsWith('photos/')) delete parts[name];
     const raw = JSON.stringify(backup); parts["backup.json"] = new TextEncoder().encode(raw);
     const manifest = JSON.stringify(await createBackupManifest(parts)); parts["manifest.json"] = new TextEncoder().encode(manifest);
     const form = new FormData(); form.set("data", raw); form.set("manifest", manifest);
@@ -491,17 +584,38 @@ try {
     const restored = await api("/api/restore", { restore: "legacy", method: "POST", body: form }); assert.equal(restored.status, 200, JSON.stringify(restored.data));
     const list = await api("/api/suppliers", { restore: "legacy" }); assert.equal(list.status, 200); assert.ok(list.data.suppliers.length > 0);
     const converted = (await api("/api/backup", { restore: "legacy" })).data;
-    assert.equal(converted.version, 3); assert.equal(converted.products.length, backup.products.length); assert.equal(converted.orders.length, backup.orders.length);
+    assert.equal(converted.version, 4); assert.equal(converted.product_photos.length, 0); assert.equal(converted.products.length, backup.products.length); assert.equal(converted.orders.length, backup.orders.length);
     assert.ok(converted.imports.filter(i => i.source_type === "supplier").every(i => converted.suppliers.some(s => s.id === i.supplier_id)));
     assert.equal((await api("/api/products", { restore: "legacy" })).data.total, (await api("/api/products")).data.total);
     const path = join(directory, "legacy-backup.zip"); await writeFile(path, zipSync(parts));
     const sqlite = spawnSync("python3", ["scripts/restore-sqlite.py", path, join(directory, "legacy-portable")], { cwd: root, encoding: "utf8" }); assert.equal(sqlite.status, 0, sqlite.stderr);
     assert.equal(JSON.parse(sqlite.stdout).sourceVersion, 2);
   });
+  await check("Копии версий 1 и 3 без фотографий восстанавливаются в D1 и SQLite", async () => {
+    for (const version of [1, 3]) {
+      const backup = JSON.parse(await readFile(join(directory, 'expected-backup.json'), 'utf8'));
+      backup.version = version; delete backup.product_photos;
+      if (version === 1) { delete backup.suppliers; for (const record of backup.imports) delete record.supplier_id; }
+      const source = unzipSync(new Uint8Array(await readFile(join(directory, 'verified-backup.zip'))));
+      const raw = JSON.stringify(backup), parts = { 'backup.json': new TextEncoder().encode(raw) };
+      const form = new FormData(); form.set('data', raw);
+      for (const record of backup.imports) if (record.file_key) { parts['files/' + record.id] = source['files/' + record.id]; form.set('file:' + record.id, new Blob([parts['files/' + record.id]]), record.filename); }
+      if (version >= 2) { const manifest = JSON.stringify(await createBackupManifest(parts)); parts['manifest.json'] = new TextEncoder().encode(manifest); form.set('manifest', manifest); }
+      const restoreTarget = 'v' + version;
+      await api('/api/me', { restore: restoreTarget });
+      const result = await api('/api/restore', { restore: restoreTarget, method: 'POST', body: form }); assert.equal(result.status, 200, JSON.stringify(result.data));
+      const restored = (await api('/api/backup', { restore: restoreTarget })).data;
+      assert.equal(restored.product_photos.length, 0); assert.equal(restored.products.length, backup.products.length); assert.equal(restored.orders.length, backup.orders.length);
+      const path = join(directory, 'v' + version + '-backup.zip'); await writeFile(path, zipSync(parts));
+      const converted = spawnSync('python3', ['scripts/restore-sqlite.py', path, join(directory, 'v' + version + '-portable')], { cwd: root, encoding: 'utf8' }); assert.equal(converted.status, 0, converted.stderr); assert.equal(JSON.parse(converted.stdout).sourceVersion, version);
+    }
+  });
   await check("Остатки и история переживают остановку и перезапуск Worker", async () => {
+    const photosBefore = (await api("/api/products/" + product.id + "/photos")).data.photos; assert.ok(photosBefore.some(p => p.id === savedPhoto.id));
     const before = (await api("/api/products")).data;
     await runtime.dispose(); runtime = new Miniflare(options);
     assert.deepEqual((await api("/api/products")).data, before);
+    assert.deepEqual((await api("/api/products/" + product.id + "/photos")).data.photos, photosBefore);
     assert.ok((await api("/api/orders")).data.orders.length >= 3);
     assert.ok((await api("/api/suppliers")).data.suppliers.length >= 15); assert.equal((await api("/api/shop-settings")).data.orderEmail, "orders@atoll.test");
   });

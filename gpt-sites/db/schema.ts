@@ -30,6 +30,16 @@ export const products = sqliteTable("products", {
 }, t => [uniqueIndex("offer_code_brand").on(t.importId, t.code, t.brand),
   check("stock_nonnegative", sql.raw("stock IS NULL OR stock >= 0")),
   check("price_positive", sql.raw("price_cents > 0"))]);
+export const productPhotos = sqliteTable("product_photos", {
+  id: text("id").primaryKey(), productId: text("product_id").notNull().references(() => products.id),
+  fileKey: text("file_key").notNull(), filename: text("filename").notNull(), contentType: text("content_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(), width: integer("width").notNull(), height: integer("height").notNull(),
+  position: integer("position").notNull(), createdAt: text("created_at").notNull(),
+}, t => [uniqueIndex("one_photo_position").on(t.productId, t.position),
+  check("photo_position", sql.raw("position >= 0 AND position < 5")),
+  check("photo_size", sql.raw("size_bytes > 0 AND size_bytes <= 3000000")),
+  check("photo_dimensions", sql.raw("width > 0 AND width <= 6000 AND height > 0 AND height <= 6000 AND width*height <= 24000000")),
+  check("photo_content_type", sql.raw("content_type IN ('image/jpeg','image/png','image/webp')"))]);
 export const orders = sqliteTable("orders", {
   id: text("id").primaryKey(), customerId: text("customer_id").notNull().references(() => customers.id),
   idempotencyKey: text("idempotency_key").notNull(), totalCents: integer("total_cents").notNull(),

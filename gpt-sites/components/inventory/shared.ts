@@ -1,4 +1,4 @@
-export type Product = { id: string; code: string; brand: string; name: string; stock: number | null; priceCents: number; sourceName: string; sourceType: string; leadDays: number | null; warehouse?: string; bin?: string; minStock?: number };
+export type Product = { id: string; code: string; brand: string; name: string; stock: number | null; priceCents: number; sourceName: string; sourceType: string; leadDays: number | null; warehouse?: string; bin?: string; minStock?: number; photoUrl?: string | null; photoCount?: number };
 export type CartLine = Product & { quantity: number };
 export type User = { id: string; name: string; email: string; role: string; discountBps: number };
 export type SiteInfo = { user: User | null; price: { filename: string; created_at: string; row_count: number } | null; productCount: number };

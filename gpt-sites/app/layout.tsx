@@ -4,7 +4,6 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Инвентари Атолл — Автозапчасти",
   description: "Поиск запчастей, персональные цены и заказы в кабинете клиента.",
-  manifest: "/manifest.webmanifest",
   appleWebApp: { capable: true, title: "Атолл", statusBarStyle: "default" },
   icons: {
     icon: "/favicon.svg",
@@ -20,6 +19,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ru">
+      <head>
+        <link rel="manifest" href="/manifest.webmanifest" crossOrigin="use-credentials" />
+      </head>
       <body className="antialiased">{children}</body>
     </html>
   );

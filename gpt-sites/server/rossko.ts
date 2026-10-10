@@ -1,7 +1,7 @@
 import { SaxesParser } from "saxes";
 import { InputError } from "../lib/inventory-domain";
 import type { RosskoOptions, RosskoOffer, RosskoWave } from "../lib/rossko";
-export type RosskoEnv = { SUPPLIER_CREDENTIALS_KEY?: string; ROSSKO_KEY1?: string; ROSSKO_KEY2?: string };
+export type RosskoEnv = { SUPPLIER_CREDENTIALS_KEY?: string; ROSSKO_KEY1?: string; ROSSKO_KEY2?: string; ROSSKO_SETUP_KEY?: string };
 export type RosskoKeys = { key1: string; key2: string };
 const ns = "https://api.rossko.ru/", soap = "http://schemas.xmlsoap.org/soap/envelope/";
 const limit = 2_000_000;

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { InputError, normalize } from "../lib/inventory-domain";
-import { rosskoDeliveryLabel, rosskoDeliveryWarning, type RosskoConnection, type RosskoOptions } from "../lib/rossko";
+import { rosskoDeliveryLabel, rosskoDeliveryMethod, rosskoDeliveryWarning, type RosskoConnection, type RosskoOptions } from "../lib/rossko";
 import { rosskoDetails, rosskoSearch, rosskoDelivery, openKeys, sealKeys, type RosskoEnv, type RosskoKeys } from "./rossko";
 export type ConnectionRow = { supplier_id: string; keys_cipher: string; delivery_id: string; address_id: number | null; options_json: string; verified_at: string | null; revision: number; last_request_at: number };
 const key = z.string().trim().refine(s => !s || /^[a-f0-9]{32}$/i.test(s), "Ключ должен содержать 32 шестнадцатеричных символа.");
@@ -24,9 +24,12 @@ const canonical = (s: string) => s.normalize("NFKC").toLocaleLowerCase("ru").rep
 export function fixedRosskoDelivery(options: RosskoOptions): RosskoOptions {
   const address = options.addresses.find(a => a.city && a.street && a.house ? canonical(a.city).includes(canonical("Новониколаевск")) && canonical(a.street).includes(canonical("Октябрьск")) && canonical(a.house + (a.office ?? "")) === "81a" : canonical(a.label).includes(canonical("Новониколаевск")) && canonical(a.label).includes(canonical("Октябрьск")) && canonical(a.label).endsWith("81a"));
   if (!address) throw new InputError("В ROSSKO отсутствует адрес: " + rosskoDeliveryLabel + ". Добавьте его в личном кабинете ROSSKO.", 409);
-  const available = options.deliveries.filter(d => !/самовывоз/i.test(d.name) && address.deliveryIds.includes(d.id));
-  const selected = available.find(d => /доставка\s+регион/i.test(d.name)) ?? available.find(d => /курьер/i.test(d.name)) ?? (available.length === 1 ? available[0] : null);
-  return { deliveries: selected ? [selected] : [], addresses: [{ ...address, label: rosskoDeliveryLabel, deliveryIds: selected ? [selected.id] : [] }] };
+  // The owner chose courier delivery. An absent optional address-to-delivery
+  // mapping must not prevent saving it or requesting prices. ROSSKO still
+  // validates each real search; keep its address mapping as returned.
+  const couriers = options.deliveries.filter(d => !/самовывоз/i.test(d.name) && /курьер/i.test(d.name));
+  const selected = couriers.find(d => canonical(d.name) === canonical(rosskoDeliveryMethod)) ?? (couriers.length === 1 ? couriers[0] : null);
+  return { deliveries: selected ? [selected] : [], addresses: [{ ...address, label: rosskoDeliveryLabel }] };
 }
 function delivery(options: RosskoOptions, deliveryId?: string, addressId?: number | null) {
   const fixed = fixedRosskoDelivery(options), d = fixed.deliveries[0], a = fixed.addresses[0];
@@ -49,8 +52,9 @@ export async function previewRosskoConnection(db: D1Database, env: RosskoEnv, in
 }
 export async function prepareRosskoConnection(db: D1Database, env: RosskoEnv, id: string, raw: unknown) {
   const input = parseInput(raw), row = await connectionRow(db, id), keys = await keysFor(env, id, row, input);
-  const changed = !row || !!input.key1 || !!input.key2 || !row.verified_at || !row.delivery_id || !!input.deliveryId && input.deliveryId !== row.delivery_id;
-  const options: RosskoOptions = fixedRosskoDelivery(changed ? await rosskoDetails(keys) : JSON.parse(row.options_json));
+  const stored: RosskoOptions | null = row ? JSON.parse(row.options_json) : null;
+  const changed = !row || !!input.key1 || !!input.key2 || !row.verified_at || !stored?.deliveries.some(d => d.id === row.delivery_id && /курьер/i.test(d.name) && !/самовывоз/i.test(d.name)) || !!input.deliveryId && input.deliveryId !== row.delivery_id;
+  const options: RosskoOptions = fixedRosskoDelivery(changed ? await rosskoDetails(keys) : stored!);
   const selected = options.deliveries.length ? delivery(options, input.deliveryId, input.addressId) : { deliveryId: "", addressId: options.addresses[0].id };
   return { cipher: changed ? await sealKeys(env, id, keys) : row.keys_cipher, options: JSON.stringify(options), verifiedAt: changed ? new Date().toISOString() : row.verified_at!, ...selected };
 }
@@ -96,13 +100,18 @@ export async function deliveryRosskoSupplier(db: D1Database, env: RosskoEnv, inp
 export async function bootstrapRossko(request: Request, db: D1Database, env: RosskoEnv) {
   // This narrow installation endpoint is for the owner-authorized deployment,
   // not visitor authentication. It accepts only server bootstrap keys, never
-  // arbitrary suppliers or orders. It does not replace existing credentials.
+  // arbitrary suppliers or orders. It never replaces existing credentials.
+  // A separate setup secret can be renewed without changing the encryption
+  // key needed to read saved supplier credentials.
   const timestamp = request.headers.get("x-rossko-setup-time") ?? "", signature = request.headers.get("x-rossko-setup-signature") ?? "";
-  if (!/^[a-f0-9]{64}$/i.test(env.SUPPLIER_CREDENTIALS_KEY ?? "") || !/^\d{13}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 60000 || !/^[a-f0-9]{64}$/i.test(signature)) throw new InputError("Доступ запрещён.", 403);
+  const setupKey = env.ROSSKO_SETUP_KEY ?? env.SUPPLIER_CREDENTIALS_KEY;
+  if (!/^[a-f0-9]{64}$/i.test(setupKey ?? "") || !/^\d{13}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 60000 || !/^[a-f0-9]{64}$/i.test(signature)) throw new InputError("Доступ запрещён.", 403);
   const raw = await request.text(); if (raw.length > 1000) throw new InputError("Доступ запрещён.", 403);
-  const hmac = await crypto.subtle.importKey("raw", Uint8Array.from(env.SUPPLIER_CREDENTIALS_KEY!.match(/../g)!, x => parseInt(x, 16)), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  const hmac = await crypto.subtle.importKey("raw", Uint8Array.from(setupKey!.match(/../g)!, x => parseInt(x, 16)), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
   const valid = await crypto.subtle.verify("HMAC", hmac, Uint8Array.from(signature.match(/../g)!, x => parseInt(x, 16)), new TextEncoder().encode("POST\n/api/integrations/rossko/bootstrap\n" + timestamp + "\n" + raw));
   if (!valid) throw new InputError("Доступ запрещён.", 403);
+  let input: { action?: "courier" };
+  try { input = z.object({ action: z.literal("courier").optional() }).strict().parse(JSON.parse(raw)); } catch { throw new InputError("Недопустимое действие подключения."); }
   const keys = { key1: env.ROSSKO_KEY1 ?? "", key2: env.ROSSKO_KEY2 ?? "" }; parseInput(keys);
   if (!keys.key1 || !keys.key2) throw new InputError("Начальные ключи ROSSKO не настроены.", 503);
   let supplier = await db.prepare("SELECT id,revision,api_provider FROM suppliers WHERE name_key=?").bind(normalize("ROSSKO")).first<{ id: string; revision: number; api_provider: string }>();
@@ -112,9 +121,19 @@ export async function bootstrapRossko(request: Request, db: D1Database, env: Ros
     const write = supplier ? db.prepare("UPDATE suppliers SET api_provider='rossko',connection_type=CASE WHEN connection_type='price' THEN 'both' ELSE connection_type END,revision=revision+1,updated_at=? WHERE id=? AND revision=?").bind(timestamp, id, supplier.revision) : db.prepare("INSERT INTO suppliers (id,name,name_key,connection_type,api_provider,website,api_url,api_docs_url,created_at,updated_at) VALUES (?,'ROSSKO',?,'api','rossko','https://rossko.ru','https://api.rossko.ru/service/v2.1','https://api.rossko.ru',?,?)").bind(id, normalize("ROSSKO"), timestamp, timestamp);
     const result = await db.batch([write, connectionStatement(db, id, c)]);
     if (!result[0].meta.changes) throw new InputError("Карточка ROSSKO изменилась. Повторите подключение.", 409);
+  } else if (input.action === "courier") {
+    if (supplier?.api_provider !== "rossko") throw new InputError("Карточка ROSSKO изменилась. Проверьте её вручную.", 409);
+    const options = fixedRosskoDelivery(await rosskoDetails(await openKeys(env, id, old.keys_cipher)));
+    const selected = options.deliveries.length ? delivery(options) : { deliveryId: "", addressId: options.addresses[0].id };
+    const verifiedAt = new Date().toISOString();
+    const result = await db.batch([
+      db.prepare("UPDATE suppliers SET revision=revision+1,updated_at=? WHERE id=? AND revision=? AND api_provider='rossko' AND EXISTS(SELECT 1 FROM supplier_connections c WHERE c.supplier_id=suppliers.id AND c.revision=?)").bind(verifiedAt, id, supplier.revision, old.revision),
+      connectionStatement(db, id, { cipher: old.keys_cipher, options: JSON.stringify(options), verifiedAt, ...selected }),
+    ]);
+    if (!result[0].meta.changes) throw new InputError("Карточка ROSSKO изменилась. Повторите подключение.", 409);
   }
   const row = await connectionRow(db, id); if (!row) throw new InputError("Подключение не сохранено.", 503);
   let search: { ok: boolean; offerCount?: number; reason?: string } = { ok: false, reason: "Не выбран способ доставки" };
   if (row.delivery_id) { try { const live = await searchRosskoSupplier(db, env, { supplierId: id, query: "333114" }); search = { ok: true, offerCount: live.offers.length }; } catch (e) { search = { ok: false, reason: e instanceof InputError ? e.message : "Поиск недоступен" }; } }
-  return { ok: true, supplierId: id, keysVerified: !!row.verified_at, deliveryReady: !!row.delivery_id, deliveryWarning: row.delivery_id ? null : rosskoDeliveryWarning, verifiedAt: row.verified_at, deliveryOptionCount: (JSON.parse(row.options_json) as RosskoOptions).deliveries.length, search };
+  return { ok: true, supplierId: id, keysVerified: !!row.verified_at, deliveryReady: !!row.delivery_id, deliveryId: row.delivery_id, addressId: row.address_id, deliveryMethod: row.delivery_id ? rosskoDeliveryMethod : null, deliveryWarning: row.delivery_id ? null : rosskoDeliveryWarning, verifiedAt: row.verified_at, deliveryOptionCount: (JSON.parse(row.options_json) as RosskoOptions).deliveries.length, search };
 }

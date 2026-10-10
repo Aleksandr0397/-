@@ -13,7 +13,7 @@ export default function Suppliers({ notify, changed, importSupplier }: { notify:
   const [rossko, setRossko] = useState<RosskoForm>(emptyRossko), [checking, setChecking] = useState(false);
   async function load() { const result = await api<{ suppliers: Supplier[] }>("/api/suppliers"); setSuppliers(result.suppliers); }
   useEffect(() => { const controller = new AbortController(); api<{ suppliers: Supplier[] }>("/api/suppliers", { signal: controller.signal }).then(result => setSuppliers(result.suppliers)).catch(e => { if (e.name !== "AbortError") setError(e.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); }); return () => controller.abort(); }, []);
-  function edit(supplier: Supplier | "new") { setEditing(supplier); setForm(supplier === "new" ? { ...empty } : supplierInput(supplier)); setRossko(supplier === "new" ? { ...emptyRossko } : { ...emptyRossko, deliveryId: supplier.rossko?.deliveryId ?? "", addressId: supplier.rossko?.addressId ?? null }); setError(""); }
+  function edit(supplier: Supplier | "new") { setEditing(supplier); setForm(supplier === "new" ? { ...empty } : supplierInput(supplier)); setRossko(supplier === "new" ? { ...emptyRossko } : { ...emptyRossko, deliveryId: supplier.rossko?.deliveryId ?? "" }); setError(""); }
   async function save(event: React.FormEvent) {
     event.preventDefault(); if (!editing || busy || checking) return; setBusy(true); setError("");
     try {

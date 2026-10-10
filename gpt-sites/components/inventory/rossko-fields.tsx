@@ -3,8 +3,8 @@ import { useState } from "react";
 import { Eye, EyeOff, ShieldCheck } from "lucide-react";
 import { api, send, date } from "./shared";
 import { rosskoDeliveryLabel, rosskoDeliveryMethod, type RosskoConnection, type RosskoOptions } from "../../lib/rossko";
-export type RosskoForm = { key1: string; key2: string; deliveryId: string; addressId: number | null };
-export const emptyRossko: RosskoForm = { key1: "", key2: "", deliveryId: "", addressId: null };
+export type RosskoForm = { key1: string; key2: string; deliveryId: string };
+export const emptyRossko: RosskoForm = { key1: "", key2: "", deliveryId: "" };
 export default function RosskoFields({ supplierId, stored, value, change, checking, setChecking }: { supplierId?: string; stored?: RosskoConnection; value: RosskoForm; change: (value: RosskoForm) => void; checking: boolean; setChecking: (busy: boolean) => void }) {
   const [visible, setVisible] = useState([false, false]), [error, setError] = useState(""), [checked, setChecked] = useState<string | null>(null);
   async function check() {
@@ -12,7 +12,7 @@ export default function RosskoFields({ supplierId, stored, value, change, checki
     try {
       const result = await api<{ ok: boolean; options: RosskoOptions; deliveryReady: boolean; deliveryWarning: string | null; deliveryId: string; addressId: number | null; checkedAt: string }>("/api/suppliers/rossko/check", send("POST", { supplierId, rossko: { key1: value.key1, key2: value.key2 } }));
       setChecked(result.checkedAt); setError(result.deliveryWarning ?? "");
-      change({ ...value, deliveryId: result.deliveryId, addressId: result.addressId });
+      change({ ...value, deliveryId: result.deliveryId });
     } catch (e) { setError((e as Error).message); } finally { setChecking(false); }
   }
   function setKey(field: "key1" | "key2", key: string) { change({ ...value, [field]: key }); setChecked(null); setError(""); }

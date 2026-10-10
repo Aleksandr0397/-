@@ -5,9 +5,11 @@ import { replaceCatalog } from "./catalog";
 import { purchaseApi, purchasingNeeds } from "./purchases";
 import { integrationStatus, previewCatalogue, type IntegrationEnv, type Provider } from "./integrations";
 import sourceSnapshot from "./source-snapshot.json";
+import { supplierApi, supplierForPrice, supplierVisible, linkLegacySuppliers } from "./suppliers";
+import { orderSettings, saveOrderSettings, type OrderSettingsEnv } from "./shop-settings";
 
 type Identity = { userId: string; email: string; displayName: string };
-type Bindings = { DB?: D1Database; BUCKET?: R2Bucket } & IntegrationEnv;
+type Bindings = { DB?: D1Database; BUCKET?: R2Bucket } & IntegrationEnv & OrderSettingsEnv;
 type Customer = { id: string; auth_user_id: string | null; email: string; name: string; role: string; discount_bps: number; markup_bps: number; created_at: string };
 type Product = { id: string; import_id: string; code: string; brand: string; name: string; stock: number | null; price_cents: number; source_name: string; source_type: string; lead_days: number | null; warehouse: string; bin: string; min_stock: number };
 type Order = { id: string; customer_id: string; idempotency_key: string; total_cents: number; status: string; comment: string; created_at: string; customer_name?: string; customer_email?: string };
@@ -74,12 +76,18 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       if (origin && origin !== url.origin) throw new InputError("Запрос должен исходить с этого сайта.", 403);
     }
     const me = user ? await currentCustomer(db, user) : null;
+    if (path === "/api/suppliers" || path.startsWith("/api/suppliers/")) {
+      admin(me); return await supplierApi(request, db);
+    }
+    if (path === "/api/shop-settings" && (method === "GET" || method === "PATCH")) {
+      admin(me); return json(method === "GET" ? await orderSettings(db, env) : await saveOrderSettings(db, await readBody(request)));
+    }
     if (path.startsWith("/api/purchase-orders")) {
       admin(me); return await purchaseApi(request, db, me.id);
     }
     if (path === "/api/me" && method === "GET") {
-      const price = await db.prepare("SELECT filename,created_at,row_count FROM imports WHERE id IN (" + activeImports + ") ORDER BY created_at DESC LIMIT 1").first();
-      const count = await db.prepare("SELECT COUNT(*) AS count FROM products WHERE import_id IN (" + activeImports + ")").first<{ count: number }>();
+      const price = await db.prepare("SELECT filename,created_at,row_count FROM imports i WHERE id IN (" + activeImports + ") AND " + supplierVisible() + " ORDER BY created_at DESC LIMIT 1").first();
+      const count = await db.prepare("SELECT COUNT(*) AS count FROM products p JOIN imports i ON i.id=p.import_id WHERE p.import_id IN (" + activeImports + ") AND " + supplierVisible()).first<{ count: number }>();
       return json({ user: me ? { id: me.id, name: me.name, email: me.email, role: me.role, discountBps: me.discount_bps } : null, price, productCount: count?.count ?? 0 });
     }
     if (path === "/api/integrations" && method === "GET") {
@@ -95,7 +103,7 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       const page = Math.floor(Math.max(0, Math.min(1000, Number(url.searchParams.get("page")) || 0)));
       const terms = query.split(" ").filter(Boolean).slice(0, 8);
       const source = url.searchParams.get("source");
-      const where = "p.import_id IN (" + activeImports + ")" + terms.map(() => " AND instr(p.search_text,?)>0").join("") + (source === "warehouse" || source === "supplier" ? " AND i.source_type=?" : "");
+      const where = "p.import_id IN (" + activeImports + ") AND " + supplierVisible() + terms.map(() => " AND instr(p.search_text,?)>0").join("") + (source === "warehouse" || source === "supplier" ? " AND i.source_type=?" : "");
       const args = [...terms, ...(source === "warehouse" || source === "supplier" ? [source] : [])];
       const rows = await all<Product>(db, productSelect + " WHERE " + where + " ORDER BY p.code,i.source_type DESC,p.price_cents LIMIT 60 OFFSET ?", ...args, page * 60);
       const count = await db.prepare("SELECT COUNT(*) AS n FROM products p JOIN imports i ON i.id=p.import_id WHERE " + where).bind(...args).first<{ n: number }>();
@@ -111,14 +119,15 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       try { decoded = JSON.parse(encoded); } catch { throw new InputError("Повреждённый прайс."); }
       const rows = validateRows(decoded);
       const sourceType = form.get("sourceType") === "supplier" ? "supplier" : "warehouse";
-      const sourceName = text(form.get("sourceName") ?? "Мой склад", "Источник прайса", 120);
+      const supplier = sourceType === "supplier" ? await supplierForPrice(db, form.get("supplierId"), form.get("sourceName")) : null;
+      const sourceName = supplier?.name ?? text(form.get("sourceName") ?? "Мой склад", "Источник прайса", 120);
       const days = form.get("leadDays");
-      const leadDays = days === null || days === "" ? null : Number(days);
+      const leadDays = days === null || days === "" ? supplier?.lead_days ?? null : Number(days);
       if (leadDays !== null && (!Number.isSafeInteger(leadDays) || leadDays < 0 || leadDays > 365)) throw new InputError("Срок поставки должен быть от 0 до 365 дней.");
       if (!(file instanceof File) || file.size > 8_000_000) throw new InputError("Прикрепите прайс размером до 8 МБ.");
       if (!env.BUCKET) throw new InputError("Хранилище файлов недоступно.", 503);
       const stockMode = form.get("stockMode") === "physical" ? "physical" : "available";
-      const result = await replaceCatalog(db, env.BUCKET, { rows, sourceName, sourceType, leadDays, stockMode, filename: file.name, content: await file.arrayBuffer(), contentType: file.type || "application/octet-stream" });
+      const result = await replaceCatalog(db, env.BUCKET, { rows, sourceName, sourceType, leadDays, stockMode, supplierId: supplier?.id, supplierRevision: supplier?.revision, filename: file.name, content: await file.arrayBuffer(), contentType: file.type || "application/octet-stream" });
       return json({ count: result.count, filename: result.filename });
     }
     if (path === "/api/products" && method === "POST") {
@@ -143,7 +152,7 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       const existing = await db.prepare("SELECT * FROM orders WHERE customer_id=? AND idempotency_key=?").bind(me.id, key).first<Order>();
       if (existing) return json({ order: await orderDetails(db, existing), repeated: true });
       const lines = mergeCart(data.items);
-      const products = await all<Product>(db, productSelect + " WHERE p.id IN (" + lines.map(() => "?").join(",") + ") AND p.import_id IN (" + activeImports + ")", ...lines.map(x => x.productId));
+      const products = await all<Product>(db, productSelect + " WHERE p.id IN (" + lines.map(() => "?").join(",") + ") AND p.import_id IN (" + activeImports + ") AND " + supplierVisible(), ...lines.map(x => x.productId));
       const mapped = lines.map(line => {
         const product = products.find(p => p.id === line.productId);
         if (!product) throw new InputError("Прайс обновлён. Обновите корзину и выберите товары заново.", 409);
@@ -166,7 +175,7 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       if (pay && (balance?.balance ?? 0) < total) throw new InputError("Недостаточно средств на балансе.", 409);
       const lineData = JSON.stringify(mapped.map(x => ({ ...x, itemId: id(), movementId: id() })));
       const stmts = [
-        db.prepare("INSERT INTO orders (id,customer_id,idempotency_key,total_cents,status,comment,created_at,channel,fiscal_status) SELECT ?,?,?,?,?,?,?,?,'not_sent' WHERE ?=(SELECT COUNT(*) FROM products p JOIN json_each(?) r ON p.id=json_extract(r.value,'$.productId') WHERE p.import_id=json_extract(r.value,'$.product.import_id') AND p.price_cents=json_extract(r.value,'$.product.price_cents') AND p.import_id IN (" + activeImports + ") AND (p.stock IS NULL OR p.stock>=json_extract(r.value,'$.quantity'))) AND EXISTS (SELECT 1 FROM customers WHERE id=? AND markup_bps=? AND discount_bps=?)" + (pay ? " AND (SELECT COALESCE(SUM(amount_cents),0) FROM ledger WHERE customer_id=?)>=?" : "")).bind(orderId, me.id, key, total, pos ? "completed" : "new", comment, created, pos ? "pos" : "online", mapped.length, lineData, me.id, me.markup_bps, me.discount_bps, ...(pay ? [me.id, total] : [])),
+        db.prepare("INSERT INTO orders (id,customer_id,idempotency_key,total_cents,status,comment,created_at,channel,fiscal_status) SELECT ?,?,?,?,?,?,?,?,'not_sent' WHERE ?=(SELECT COUNT(*) FROM products p JOIN imports i ON i.id=p.import_id JOIN json_each(?) r ON p.id=json_extract(r.value,'$.productId') WHERE p.import_id=json_extract(r.value,'$.product.import_id') AND p.price_cents=json_extract(r.value,'$.product.price_cents') AND p.import_id IN (" + activeImports + ") AND " + supplierVisible() + " AND (p.stock IS NULL OR p.stock>=json_extract(r.value,'$.quantity'))) AND EXISTS (SELECT 1 FROM customers WHERE id=? AND markup_bps=? AND discount_bps=?)" + (pay ? " AND (SELECT COALESCE(SUM(amount_cents),0) FROM ledger WHERE customer_id=?)>=?" : "")).bind(orderId, me.id, key, total, pos ? "completed" : "new", comment, created, pos ? "pos" : "online", mapped.length, lineData, me.id, me.markup_bps, me.discount_bps, ...(pay ? [me.id, total] : [])),
         db.prepare("INSERT INTO order_items (id,order_id,product_id,code,brand,name,quantity,unit_price_cents,source_name,source_type,lead_days) SELECT json_extract(value,'$.itemId'),?,json_extract(value,'$.productId'),json_extract(value,'$.product.code'),json_extract(value,'$.product.brand'),json_extract(value,'$.product.name'),json_extract(value,'$.quantity'),json_extract(value,'$.price'),json_extract(value,'$.product.source_name'),json_extract(value,'$.product.source_type'),json_extract(value,'$.product.lead_days') FROM json_each(?)").bind(orderId, lineData),
         db.prepare("INSERT INTO stock_movements (id,product_id,delta,kind,reference_id,created_at) SELECT json_extract(r.value,'$.movementId'),p.id,CASE WHEN p.stock IS NULL THEN NULL ELSE -json_extract(r.value,'$.quantity') END,'order',?,? FROM json_each(?) r JOIN products p ON p.id=json_extract(r.value,'$.productId')").bind(orderId, created, lineData),
         db.prepare("UPDATE products SET stock=CASE WHEN stock IS NULL THEN NULL ELSE stock-(SELECT json_extract(value,'$.quantity') FROM json_each(?) WHERE json_extract(value,'$.productId')=products.id) END WHERE id IN (SELECT json_extract(value,'$.productId') FROM json_each(?))").bind(lineData, lineData),
@@ -313,9 +322,11 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
     }
     if (path === "/api/backup" && method === "GET") {
       admin(me);
+      await orderSettings(db, env);
+      await linkLegacySuppliers(db);
       const tables = backupTables;
       const records = await db.batch(tables.map(table => db.prepare(table === "customers" ? "SELECT id,email,name,role,discount_bps,markup_bps,created_at FROM customers" : "SELECT * FROM " + table)));
-      const dump: Record<string, unknown> = { format: "inventory-atoll", version: 2, exportedAt: now(), ...Object.fromEntries(tables.map((table, index) => [table, records[index].results])) };
+      const dump: Record<string, unknown> = { format: "inventory-atoll", version: 3, exportedAt: now(), ...Object.fromEntries(tables.map((table, index) => [table, records[index].results])) };
       return json(dump);
     }
     if (path === "/api/restore" && method === "POST") {

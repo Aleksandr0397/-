@@ -5,14 +5,16 @@ export type CatalogInput = {
   rows: CatalogRow[]; sourceName: string; sourceType: "warehouse" | "supplier";
   leadDays: number | null; stockMode: "physical" | "available";
   filename: string; content: ArrayBuffer; contentType: string;
+  supplierId?: string | null; supplierRevision?: number | null;
 };
 type Existing = { id: string; code: string; brand: string; warehouse: string; bin: string; min_stock: number };
 
 export async function replaceCatalog(db: D1Database, bucket: R2Bucket, input: CatalogInput) {
   const { rows, sourceName, sourceType, leadDays, stockMode } = input;
-  const activeKey = "active_import:" + normalize(sourceType + ":" + sourceName);
+  const supplierId = input.supplierId ?? null;
+  const activeKey = supplierId ? "active_import:supplier:" + supplierId : "active_import:" + normalize(sourceType + ":" + sourceName);
   const oldImport = (await db.prepare("SELECT value FROM settings WHERE key=?").bind(activeKey).first<{ value: string }>())?.value ?? "";
-  const previous = (await db.prepare("SELECT p.id,p.code,p.brand,p.warehouse,p.bin,p.min_stock FROM products p JOIN imports i ON i.id=p.import_id WHERE i.source_type=? AND i.source_name=? ORDER BY i.created_at DESC").bind(sourceType, sourceName).all<Existing>()).results;
+  const previous = (await db.prepare("SELECT p.id,p.code,p.brand,p.warehouse,p.bin,p.min_stock FROM products p JOIN imports i ON i.id=p.import_id WHERE i.source_type=? AND " + (supplierId ? "i.supplier_id=?" : "i.source_name=?") + " ORDER BY i.created_at DESC").bind(sourceType, supplierId ?? sourceName).all<Existing>()).results;
   const known = new Map<string, Existing>();
   for (const item of previous) {
     const key = normalize(item.code) + "\u0000" + normalize(item.brand);
@@ -26,8 +28,8 @@ export async function replaceCatalog(db: D1Database, bucket: R2Bucket, input: Ca
   });
   const importId = crypto.randomUUID(), created = new Date().toISOString(), key = "imports/" + importId;
   const filename = input.filename.replace(/[\x00-\x1f/\\]/g, "_").slice(0, 180);
-  const statements = [db.prepare("INSERT INTO imports (id,filename,file_key,row_count,created_at,source_name,source_type,lead_days) SELECT ?,?,?,?,?,?,?,? WHERE COALESCE((SELECT value FROM settings WHERE key=?),'')=?")
-    .bind(importId, filename, key, rows.length, created, sourceName, sourceType, leadDays, activeKey, oldImport)];
+  const statements = [db.prepare("INSERT INTO imports (id,filename,file_key,row_count,created_at,source_name,source_type,lead_days,supplier_id) SELECT ?,?,?,?,?,?,?,?,? WHERE COALESCE((SELECT value FROM settings WHERE key=?),'')=?" + (supplierId ? " AND EXISTS (SELECT 1 FROM suppliers WHERE id=? AND revision=? AND enabled=1 AND connection_type IN ('price','both'))" : ""))
+    .bind(importId, filename, key, rows.length, created, sourceName, sourceType, leadDays, supplierId, activeKey, oldImport, ...(supplierId ? [supplierId, input.supplierRevision ?? 0] : []))];
   // JSON binds keep a 10,000-row price below the per-query parameter and
   // invocation query limits. The entire replacement is one D1 transaction.
   for (let offset = 0; offset < prepared.length; offset += 500) {

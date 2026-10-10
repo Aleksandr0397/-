@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { zipSync } from "fflate";
+import { zipSync, unzipSync } from "fflate";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,7 +20,8 @@ await build({
       export default { fetch(request, env) {
         const userId = request.headers.get("x-test-user");
         const user = userId ? { userId, email: request.headers.get("x-test-email"), displayName: userId } : null;
-        const DB = new URL(request.url).hostname === "restore.atoll.test" ? env.RESTORE_DB : env.DB;
+        const hostname = new URL(request.url).hostname;
+        const DB = hostname === "legacyrestore.atoll.test" ? env.LEGACY_RESTORE_DB : hostname === "restore.atoll.test" ? env.RESTORE_DB : env.DB;
         let queries = 0;
         const statements = new WeakMap();
         function count(n = 1) { queries += n; if (queries > 50) throw new Error("Verification: D1 query budget exceeded"); }
@@ -30,7 +31,7 @@ await build({
           statements.set(result, stmt); return result;
         }
         const metered = { prepare(sql) { return wrap(DB.prepare(sql)); }, batch(list) { count(list.length); return DB.batch(list.map(x => statements.get(x))); } };
-        return inventoryApi(request, { DB: metered, BUCKET: env.BUCKET }, user).then(response => {
+        return inventoryApi(request, { DB: metered, BUCKET: env.BUCKET, ORDER_NOTIFICATION_EMAIL: "receiver@atoll.test" }, user).then(response => {
           const headers = new Headers(response.headers); headers.set("x-test-queries", String(queries));
           return new Response(response.body, { status: response.status, headers });
         });
@@ -40,11 +41,11 @@ await build({
   outfile: bundle, bundle: true, format: "esm", platform: "browser", target: "es2022",
 });
 const helpersBundle = join(directory, "helpers.mjs");
-await build({ stdin: { contents: 'export { checkoutAttempt, pendingCheckout, completeCheckout } from "./lib/checkout-attempt.ts"; export { mutationAttempt, pendingMutation, completeMutation } from "./lib/mutation-attempt.ts"; export { createBackupManifest } from "./lib/backup-integrity.ts"; export { previewCatalogue } from "./server/integrations.ts";', resolveDir: root, sourcefile: "verify-helpers.ts", loader: "ts" }, outfile: helpersBundle, bundle: true, format: "esm", platform: "node", target: "es2022" });
-const { checkoutAttempt, pendingCheckout, completeCheckout, previewCatalogue, mutationAttempt, pendingMutation, completeMutation, createBackupManifest } = await import(pathToFileURL(helpersBundle).href);
+await build({ stdin: { contents: 'export { checkoutAttempt, pendingCheckout, completeCheckout } from "./lib/checkout-attempt.ts"; export { mutationAttempt, pendingMutation, completeMutation } from "./lib/mutation-attempt.ts"; export { createBackupManifest } from "./lib/backup-integrity.ts"; export { previewCatalogue } from "./server/integrations.ts"; export { linkLegacySuppliers } from "./server/suppliers.ts";', resolveDir: root, sourcefile: "verify-helpers.ts", loader: "ts" }, outfile: helpersBundle, bundle: true, format: "esm", platform: "node", target: "es2022" });
+const { checkoutAttempt, pendingCheckout, completeCheckout, previewCatalogue, mutationAttempt, pendingMutation, completeMutation, createBackupManifest, linkLegacySuppliers } = await import(pathToFileURL(helpersBundle).href);
 const options = {
   modules: true, scriptPath: bundle, compatibilityDate: "2026-05-01", cf: false,
-  log: new Log(LogLevel.ERROR), d1Databases: { DB: "test-atoll", RESTORE_DB: "test-restore", UPGRADE_DB: "test-upgrade" },
+  log: new Log(LogLevel.ERROR), d1Databases: { DB: "test-atoll", RESTORE_DB: "test-restore", LEGACY_RESTORE_DB: "test-legacy-restore", UPGRADE_DB: "test-upgrade" },
   r2Buckets: ["BUCKET"], d1Persist: join(directory, "d1"), r2Persist: join(directory, "r2"),
 };
 let runtime = new Miniflare(options);
@@ -63,16 +64,24 @@ async function api(path, { user = owner, method = "GET", body, restore = false }
     headers["content-type"] = serialized.headers.get("content-type");
     body = await serialized.arrayBuffer();
   } else if (body) { headers["content-type"] = "application/json"; body = JSON.stringify(body); }
-  const response = await runtime.dispatchFetch("http://" + (restore ? "restore" : "app") + ".atoll.test" + path, { method, headers, body });
+  const response = await runtime.dispatchFetch("http://" + (restore === "legacy" ? "legacyrestore" : restore ? "restore" : "app") + ".atoll.test" + path, { method, headers, body });
   const raw = await response.text();
   let data; try { data = JSON.parse(raw); } catch { data = raw; }
   return { status: response.status, data, queries: Number(response.headers.get("x-test-queries")) };
 }
-async function importPrice(rows, sourceName = "Основной склад", sourceType = "warehouse", stockMode = "available", expectedStatus = 200) {
+async function importPrice(rows, sourceName = "Основной склад", sourceType = "warehouse", stockMode = "available", expectedStatus = 200, supplierId = null) {
   const form = new FormData();
   form.set("file", new Blob(["Артикул;Бренд;Название;Цена;Остаток\n" + rows.map(x => [x.code,x.brand,x.name,x.priceCents/100,x.stock ?? ""].join(";")).join("\n")]), "price.csv");
   form.set("rows", JSON.stringify(rows)); form.set("sourceName", sourceName);
   form.set("sourceType", sourceType); form.set("leadDays", sourceType === "warehouse" ? "0" : "3"); form.set("stockMode", stockMode);
+  if (sourceType === "supplier") {
+    if (!supplierId) {
+      const existing = (await api("/api/suppliers")).data.suppliers.find(s => s.name.toLowerCase() === sourceName.toLowerCase());
+      if (existing) supplierId = existing.id;
+      else { const created = await api("/api/suppliers", { method: "POST", body: { name: sourceName, connectionType: "price", leadDays: 3 } }); assert.equal(created.status, 201, JSON.stringify(created.data)); supplierId = created.data.supplier.id; }
+    }
+    form.set("supplierId", supplierId);
+  }
   const result = await api("/api/imports", { method: "POST", body: form });
   assert.equal(result.status, expectedStatus, JSON.stringify(result.data));
   return result;
@@ -85,7 +94,7 @@ let product, adminId, customerId, order, saleId;
 let purchase, purchaseGoods;
 try {
   await check("Все SQL-миграции применяются к пустой настоящей D1", async () => {
-    for (const binding of ["DB", "RESTORE_DB"]) {
+    for (const binding of ["DB", "RESTORE_DB", "LEGACY_RESTORE_DB"]) {
       const db = await runtime.getD1Database(binding);
       for (const file of (await readdir(join(root, "drizzle"))).filter(x => x.endsWith(".sql")).sort()) {
         const sql = await readFile(join(root, "drizzle", file), "utf8");
@@ -113,6 +122,55 @@ try {
     assert.equal(customer.data.user.role, "customer"); customerId = customer.data.user.id;
     assert.equal((await api("/api/backup", { user: client })).status, 403);
     assert.equal((await api("/api/orders", { user: null })).status, 401);
+  });
+  await check("Администратор создаёт поставщика вручную с настройками API", async () => {
+    const result = await api("/api/suppliers", { method: "POST", body: { name: "Ручной API-поставщик", connectionType: "api", leadDays: 2, apiUrl: "https://parts.example.test/api", apiDocsUrl: "https://parts.example.test/docs" } });
+    assert.equal(result.status, 201, JSON.stringify(result.data));
+    const list = await api("/api/suppliers");
+    assert.equal(list.status, 200); assert.ok(list.data.suppliers.some(s => s.id === result.data.supplier.id && s.connection_type === "api"));
+  });
+  await check("15 поставщиков с разными способами работы сохраняются независимо", async () => {
+    for (let index = 0; index < 15; index++) {
+      const type = ["price", "api", "both"][index % 3];
+      const result = await api("/api/suppliers", { method: "POST", body: { name: "Поставщик карточка " + String(index + 1).padStart(2, "0"), connectionType: type, leadDays: index, contactName: "Менеджер " + index, email: "supplier" + index + "@atoll.test", notes: "Доставка по договору" } });
+      assert.equal(result.status, 201, JSON.stringify(result.data)); assert.equal(result.data.supplier.connection_type, type);
+    }
+    const list = (await api("/api/suppliers")).data.suppliers;
+    assert.equal(list.filter(s => s.name.startsWith("Поставщик карточка")).length, 15); assert.equal(new Set(list.map(s => s.id)).size, list.length);
+    assert.ok(list.every(s => s.apiConnected === false));
+  });
+  await check("Справочник поставщиков защищён от клиента, дублей и неверных настроек", async () => {
+    assert.equal((await api("/api/suppliers", { user: client })).status, 403);
+    assert.equal((await api("/api/suppliers", { user: null, method: "POST", body: { name: "Чужой" } })).status, 403);
+    const s = (await api("/api/suppliers")).data.suppliers[0];
+    assert.equal((await api("/api/suppliers/" + s.id, { user: client, method: "PATCH", body: { enabled: false, expectedRevision: s.revision } })).status, 403);
+    assert.equal((await api("/api/suppliers", { method: "POST", body: { name: "   РУЧНОЙ api-ПОСТАВЩИК   " } })).status, 409);
+    assert.equal((await api("/api/suppliers", { method: "POST", body: { name: "№".repeat(80) } })).status, 201);
+    for (const fields of [{ name: "" }, { name: "Ошибка", connectionType: "unknown" }, { name: "Ошибка", leadDays: -1 }, { name: "Ошибка", email: "bad" }, { name: "Ошибка", apiUrl: "https://user:secret@parts.test/api" }, { name: "Ошибка", apiUrl: "https://parts.test/api?token=secret" }]) assert.equal((await api("/api/suppliers", { method: "POST", body: fields })).status, 400);
+    const form = new FormData(); form.set("file", new Blob(["test"]), "price.csv"); form.set("rows", JSON.stringify(priceRows)); form.set("sourceType", "supplier"); form.set("sourceName", "Не создан вручную");
+    assert.equal((await api("/api/imports", { method: "POST", body: form })).status, 400);
+  });
+  await check("Старые прайсы связываются со справочником без потери товаров и повторных записей", async () => {
+    const db = await runtime.getD1Database("UPGRADE_DB");
+    await db.batch([
+      db.prepare("INSERT INTO imports (id,filename,row_count,created_at,source_name,source_type,lead_days) VALUES ('legacy-price','old.csv',1,'2026-01-01T00:00:00.000Z','Старый поставщик','supplier',4)"),
+      db.prepare("INSERT INTO products (id,import_id,code,brand,name,search_text,stock,price_cents) VALUES ('legacy-product','legacy-price','OLD','TEST','Старая деталь','old',7,15000)"),
+      db.prepare("INSERT INTO settings (key,value) VALUES ('active_import:supplier:старый поставщик','legacy-price')"),
+    ]);
+    await linkLegacySuppliers(db); await linkLegacySuppliers(db);
+    const rows = (await db.prepare("SELECT * FROM suppliers").all()).results; assert.equal(rows.length, 1); assert.equal(rows[0].lead_days, 4);
+    assert.equal((await db.prepare("SELECT supplier_id FROM imports WHERE id='legacy-price'").first()).supplier_id, rows[0].id);
+    assert.equal((await db.prepare("SELECT value FROM settings WHERE key=?").bind("active_import:supplier:" + rows[0].id).first()).value, "legacy-price");
+    assert.equal((await db.prepare("SELECT stock FROM products WHERE id='legacy-product'").first()).stock, 7);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM settings WHERE key LIKE 'active_import:%'").first()).n, 1);
+  });
+  await check("Email заказов сохраняется, защищён от клиента и не обещает отправку без сервиса", async () => {
+    const initial = await api("/api/shop-settings"); assert.equal(initial.status, 200); assert.equal(initial.data.orderEmail, "receiver@atoll.test"); assert.equal(initial.data.emailSendingConnected, false);
+    assert.equal((await api("/api/shop-settings", { user: client })).status, 403);
+    assert.equal((await api("/api/shop-settings", { user: client, method: "PATCH", body: { orderEmail: "thief@atoll.test" } })).status, 403);
+    assert.equal((await api("/api/shop-settings", { method: "PATCH", body: { orderEmail: "bad" } })).status, 400);
+    assert.equal((await api("/api/shop-settings", { method: "PATCH", body: { orderEmail: "Orders@atoll.test" } })).data.orderEmail, "orders@atoll.test");
+    assert.equal((await api("/api/shop-settings")).data.orderEmail, "orders@atoll.test");
   });
   await check("После обрыва и перезагрузки сохраняются ключ заказа и выбранная оплата", async () => {
     const values = new Map(); const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
@@ -343,6 +401,38 @@ try {
     assert.equal((await mutationAttempt("receive:owner:purchase", payload, storage)).key, first.key);
     assert.deepEqual(reloaded.payload, payload); completeMutation(reloaded, storage); assert.equal(pendingMutation("receive:owner:purchase", storage), null);
   });
+  await check("Переименование поставщика сохраняет товар, независимые прайсы и историю закупок", async () => {
+    const first = (await api("/api/suppliers", { method: "POST", body: { name: "Переименуемый", connectionType: "both", email: "contact@atoll.test", leadDays: 2 } })).data.supplier;
+    const second = (await api("/api/suppliers", { method: "POST", body: { name: "Соседний поставщик" } })).data.supplier;
+    const row = { code: "SUP-MANUAL", brand: "TEST", name: "Деталь поставщика", priceCents: 1000, stock: 5 };
+    await importPrice([row], first.name, "supplier", "available", 200, first.id); await importPrice([{ ...row, priceCents: 1500 }], second.name, "supplier", "available", 200, second.id);
+    const offers = (await api("/api/products?q=SUP-MANUAL")).data.items, firstOffer = offers.find(p => p.sourceName === first.name), secondOffer = offers.find(p => p.sourceName === second.name);
+    const target = await api("/api/products", { method: "POST", body: { ...row, stock: 0, minStock: 2, sourceName: "Склад для справочника" } }); assert.equal(target.status, 201);
+    const procurement = await api("/api/purchase-orders", { method: "POST", body: { idempotencyKey: "supplier-document", items: [{ warehouseProductId: target.data.id, supplierProductId: firstOffer.id, quantity: 2 }] } }); assert.equal(procurement.status, 201, JSON.stringify(procurement.data));
+    const customerOrder = await api("/api/orders", { user: client, method: "POST", body: { idempotencyKey: "supplier-history", items: [{ productId: firstOffer.id, quantity: 1 }] } }); assert.equal(customerOrder.status, 201);
+    const renamed = await api("/api/suppliers/" + first.id, { method: "PATCH", body: { name: "Новое название", expectedRevision: first.revision } }); assert.equal(renamed.status, 200); assert.equal(renamed.data.supplier.email, "contact@atoll.test");
+    assert.equal((await api("/api/suppliers/" + first.id, { method: "PATCH", body: { leadDays: 10, expectedRevision: first.revision } })).status, 409);
+    await importPrice([{ ...row, priceCents: 1200 }], "Старое название игнорируется при выборе ID", "supplier", "available", 200, first.id);
+    const current = (await api("/api/products?q=SUP-MANUAL")).data.items;
+    assert.equal(current.find(p => p.id === firstOffer.id).basePriceCents, 1200); assert.equal(current.find(p => p.id === firstOffer.id).sourceName, "Новое название"); assert.equal(current.find(p => p.id === secondOffer.id).basePriceCents, 1500);
+    assert.equal((await api("/api/orders")).data.orders.find(o => o.id === customerOrder.data.order.id).items[0].source_name, first.name);
+    assert.equal((await api("/api/purchase-orders")).data.orders.find(o => o.id === procurement.data.orders[0].id).supplier_name, first.name);
+    const disabled = await api("/api/suppliers/" + first.id, { method: "PATCH", body: { enabled: false, expectedRevision: renamed.data.supplier.revision } }); assert.equal(disabled.status, 200);
+    assert.ok(!(await api("/api/products?q=SUP-MANUAL", { user: client })).data.items.some(p => p.id === firstOffer.id));
+    assert.equal((await api("/api/orders", { user: client, method: "POST", body: { idempotencyKey: "disabled-supplier", items: [{ productId: firstOffer.id, quantity: 1 }] } })).status, 409);
+    assert.ok((await api("/api/purchasing")).data.needs.every(n => !n.offers.some(p => p.id === firstOffer.id)));
+    await importPrice([row], first.name, "supplier", "available", 409, first.id);
+    const enabled = await api("/api/suppliers/" + first.id, { method: "PATCH", body: { enabled: true, expectedRevision: disabled.data.supplier.revision } }); assert.equal(enabled.status, 200);
+    assert.ok((await api("/api/products?q=SUP-MANUAL")).data.items.some(p => p.id === firstOffer.id));
+  });
+  await check("API-поставщик не принимает прайс, а параллельное редактирование не теряет изменения", async () => {
+    const supplier = (await api("/api/suppliers")).data.suppliers.find(s => s.name === "Ручной API-поставщик");
+    await importPrice([priceRows[0]], supplier.name, "supplier", "available", 409, supplier.id);
+    const results = await Promise.all([4, 7].map(leadDays => api("/api/suppliers/" + supplier.id, { method: "PATCH", body: { leadDays, expectedRevision: supplier.revision } })));
+    assert.deepEqual(results.map(r => r.status).sort(), [200, 409]);
+    const current = (await api("/api/suppliers")).data.suppliers.find(s => s.id === supplier.id);
+    assert.equal(current.revision, supplier.revision + 1); assert.equal(current.lead_days, results.find(r => r.status === 200).data.supplier.lead_days);
+  });
   await check("Данные, закупки, приёмки и файлы восстанавливаются в новую D1", async () => {
     const backup = (await api("/api/backup")).data;
     const restoredOwner = await api("/api/me", { restore: true }); assert.equal(restoredOwner.data.user.role, "admin");
@@ -351,7 +441,7 @@ try {
     const bucket = await runtime.getR2Bucket("BUCKET");
     for (const record of backup.imports) if (record.file_key) { const bytes = new Uint8Array(await (await bucket.get(record.file_key)).arrayBuffer()); form.set("file:" + record.id, new Blob([bytes]), record.filename); parts["files/" + record.id] = bytes; }
     const manifest = JSON.stringify(await createBackupManifest(parts)); form.set("manifest", manifest);
-    const altered = new FormData(); altered.set("data", raw.replace('"version":2', '"version":1')); altered.set("manifest", manifest);
+    const altered = new FormData(); altered.set("data", raw.replace('"version":3', '"version":1')); altered.set("manifest", manifest);
     const rejected = await api("/api/restore", { restore: true, method: "POST", body: altered });
     assert.equal(rejected.status, 400); assert.match(rejected.data.error, /Контрольная сумма/);
     const corruptFile = new FormData(); for (const [name, value] of form.entries()) corruptFile.set(name, value);
@@ -365,6 +455,7 @@ try {
     assert.equal(copied.products.length, backup.products.length); assert.equal(copied.orders.length, backup.orders.length);
     assert.deepEqual(copied.orders.map(x => x.total_cents).sort(), backup.orders.map(x => x.total_cents).sort());
     assert.deepEqual(copied.purchase_orders, backup.purchase_orders); assert.deepEqual(copied.purchase_receipt_items, backup.purchase_receipt_items);
+    assert.deepEqual(copied.suppliers, backup.suppliers); assert.equal((await api("/api/shop-settings", { restore: true })).data.orderEmail, "orders@atoll.test");
     assert.equal((await api("/api/wallet", { restore: true, user: client })).data.balanceCents, 30000);
     assert.equal((await api("/api/restore", { restore: true, method: "POST", body: form })).status, 409);
     parts["manifest.json"] = new TextEncoder().encode(manifest);
@@ -382,11 +473,37 @@ try {
     const repeated = spawnSync("python3", ["scripts/restore-sqlite.py", join(directory, "verified-backup.zip"), target], { cwd: root, encoding: "utf8" });
     assert.equal(repeated.status, 1); assert.match(repeated.stderr, /already exists/);
   });
+  await check("Копия версии 2 без справочника восстанавливается в D1 и SQLite, затем поставщики связываются", async () => {
+    const backup = JSON.parse(await readFile(join(directory, "expected-backup.json"), "utf8"));
+    backup.version = 2; delete backup.suppliers;
+    const imports = new Map(backup.imports.map(i => [i.id, i]));
+    for (const setting of backup.settings) {
+      const record = imports.get(setting.value);
+      if (setting.key.startsWith("active_import:") && record?.source_type === "supplier") setting.key = "active_import:supplier:" + record.source_name.normalize("NFKC").toLocaleLowerCase("ru-RU").replace(/\s+/g, " ").trim();
+    }
+    for (const record of backup.imports) delete record.supplier_id;
+    const parts = unzipSync(new Uint8Array(await readFile(join(directory, "verified-backup.zip")))); delete parts["manifest.json"];
+    const raw = JSON.stringify(backup); parts["backup.json"] = new TextEncoder().encode(raw);
+    const manifest = JSON.stringify(await createBackupManifest(parts)); parts["manifest.json"] = new TextEncoder().encode(manifest);
+    const form = new FormData(); form.set("data", raw); form.set("manifest", manifest);
+    for (const record of backup.imports) if (record.file_key) form.set("file:" + record.id, new Blob([parts["files/" + record.id]]), record.filename);
+    await api("/api/me", { restore: "legacy" });
+    const restored = await api("/api/restore", { restore: "legacy", method: "POST", body: form }); assert.equal(restored.status, 200, JSON.stringify(restored.data));
+    const list = await api("/api/suppliers", { restore: "legacy" }); assert.equal(list.status, 200); assert.ok(list.data.suppliers.length > 0);
+    const converted = (await api("/api/backup", { restore: "legacy" })).data;
+    assert.equal(converted.version, 3); assert.equal(converted.products.length, backup.products.length); assert.equal(converted.orders.length, backup.orders.length);
+    assert.ok(converted.imports.filter(i => i.source_type === "supplier").every(i => converted.suppliers.some(s => s.id === i.supplier_id)));
+    assert.equal((await api("/api/products", { restore: "legacy" })).data.total, (await api("/api/products")).data.total);
+    const path = join(directory, "legacy-backup.zip"); await writeFile(path, zipSync(parts));
+    const sqlite = spawnSync("python3", ["scripts/restore-sqlite.py", path, join(directory, "legacy-portable")], { cwd: root, encoding: "utf8" }); assert.equal(sqlite.status, 0, sqlite.stderr);
+    assert.equal(JSON.parse(sqlite.stdout).sourceVersion, 2);
+  });
   await check("Остатки и история переживают остановку и перезапуск Worker", async () => {
     const before = (await api("/api/products")).data;
     await runtime.dispose(); runtime = new Miniflare(options);
     assert.deepEqual((await api("/api/products")).data, before);
     assert.ok((await api("/api/orders")).data.orders.length >= 3);
+    assert.ok((await api("/api/suppliers")).data.suppliers.length >= 15); assert.equal((await api("/api/shop-settings")).data.orderEmail, "orders@atoll.test");
   });
 } catch (error) {
   console.error(error.message); if (!failed) failed++;

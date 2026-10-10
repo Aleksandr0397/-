@@ -15,7 +15,7 @@ import sqlite3
 import tempfile
 import zipfile
 
-TABLES = ["customers", "imports", "products", "orders", "order_items", "vin_requests",
+TABLES = ["customers", "suppliers", "imports", "products", "orders", "order_items", "vin_requests",
           "topups", "ledger", "stock_movements", "purchase_runs", "purchase_orders",
           "purchase_order_items", "purchase_receipts", "purchase_receipt_items", "settings"]
 DEFAULTS = {
@@ -42,9 +42,9 @@ def load_archive(path):
         require("backup.json" in archive.namelist(), "Missing backup.json.")
         raw = archive.read("backup.json")
         data = json.loads(raw)
-        require(data.get("format") == "inventory-atoll" and type(data.get("version")) is int and data["version"] in (1, 2), "Unsupported backup format.")
+        require(data.get("format") == "inventory-atoll" and type(data.get("version")) is int and data["version"] in (1, 2, 3), "Unsupported backup format.")
         for table in TABLES:
-            if table.startswith("purchase_"):
+            if table.startswith("purchase_") or table == "suppliers" and data["version"] < 3:
                 data.setdefault(table, [])
             require(isinstance(data.get(table), list) and all(isinstance(row, dict) for row in data[table]), "Invalid table: " + table)
             if table != "settings":
@@ -67,7 +67,8 @@ def load_archive(path):
             for entry in entries:
                 value = parts[entry["path"]]
                 require(entry.get("size") == len(value) and entry.get("sha256") == hashlib.sha256(value).hexdigest(), "Checksum mismatch: " + entry["path"])
-        require(data["version"] != 2 or manifest is not None, "Version 2 requires manifest.json.")
+        require(data["version"] < 2 or manifest is not None, "Version 2/3 requires manifest.json.")
+        require(data["version"] < 3 or all(record.get("supplier_id") for record in data["imports"] if record.get("source_type") == "supplier"), "A supplier price is missing its supplier ID.")
         return data, parts, manifest is not None
 
 

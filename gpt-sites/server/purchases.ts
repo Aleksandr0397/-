@@ -1,4 +1,5 @@
 import { InputError, normalize, positiveInt, text } from "../lib/inventory-domain";
+import { supplierVisible } from "./suppliers";
 
 const active = "SELECT value FROM settings WHERE key LIKE 'active_import:%'";
 const joinedProducts = "SELECT p.*,i.source_name,i.source_type,i.lead_days FROM products p JOIN imports i ON i.id=p.import_id";
@@ -19,7 +20,7 @@ async function ordersForRun(db: D1Database, runId: string) { return all<Purchase
 
 export async function purchasingNeeds(db: D1Database) {
   const warehouse = await all<ProductRow & { incoming_qty: number }>(db, joinedProducts.replace("p.*,", "p.*," + incoming("p") + " AS incoming_qty,") + " WHERE p.import_id IN (" + active + ") AND i.source_type='warehouse' AND p.stock IS NOT NULL AND p.stock<p.min_stock ORDER BY p.code,p.id LIMIT 500");
-  const suppliers = await all<ProductRow & { planned_qty: number }>(db, joinedProducts.replace("p.*,", "p.*," + plannedSupply("p") + " AS planned_qty,") + " WHERE p.import_id IN (" + active + ") AND i.source_type='supplier' AND (p.stock IS NULL OR p.stock>0)");
+  const suppliers = await all<ProductRow & { planned_qty: number }>(db, joinedProducts.replace("p.*,", "p.*," + plannedSupply("p") + " AS planned_qty,") + " WHERE p.import_id IN (" + active + ") AND i.source_type='supplier' AND " + supplierVisible() + " AND (p.stock IS NULL OR p.stock>0)");
   return warehouse.map(product => {
     const quantity = Math.max(0, product.min_stock - (product.stock ?? 0) - product.incoming_qty);
     const offers = suppliers.filter(s => normalize(s.code) === normalize(product.code) && normalize(s.brand) === normalize(product.brand))
@@ -46,7 +47,7 @@ export async function purchaseApi(request: Request, db: D1Database, customerId: 
     }));
     if (new Set(requested.map((r: { warehouseProductId: string }) => r.warehouseProductId)).size !== requested.length) throw new InputError("Один складской товар нельзя повторять в закупке.");
     const ids = [...new Set<string>(requested.flatMap((r: { warehouseProductId: string; supplierProductId: string }) => [r.warehouseProductId, r.supplierProductId]))];
-    const products = await all<ProductRow & { incoming_qty: number; planned_qty: number }>(db, joinedProducts.replace("p.*,", "p.*," + incoming("p") + " AS incoming_qty," + plannedSupply("p") + " AS planned_qty,") + " WHERE p.id IN (SELECT value FROM json_each(?)) AND p.import_id IN (" + active + ")", JSON.stringify(ids));
+    const products = await all<ProductRow & { incoming_qty: number; planned_qty: number }>(db, joinedProducts.replace("p.*,", "p.*," + incoming("p") + " AS incoming_qty," + plannedSupply("p") + " AS planned_qty,") + " WHERE p.id IN (SELECT value FROM json_each(?)) AND p.import_id IN (" + active + ") AND " + supplierVisible(), JSON.stringify(ids));
     const byId = new Map(products.map(p => [p.id, p]));
     const lines = requested.map((r: { warehouseProductId: string; supplierProductId: string; quantity: number }) => {
       const target = byId.get(r.warehouseProductId), supplier = byId.get(r.supplierProductId);
@@ -64,8 +65,9 @@ export async function purchaseApi(request: Request, db: D1Database, customerId: 
     const orders = supplierNames.map(supplierName => ({ id: crypto.randomUUID(), supplierName, total: lines.filter((l: { supplier: ProductRow }) => l.supplier.source_name === supplierName).reduce((sum: number, l: { quantity: number; supplier: ProductRow }) => sum + l.quantity * l.supplier.price_cents, 0) }));
     for (const order of orders) positiveInt(order.total, "Сумма закупки", Number.MAX_SAFE_INTEGER);
     const payload = JSON.stringify(lines.map((l: { supplier: ProductRow & { planned_qty: number }; target: ProductRow & { incoming_qty: number }; [key: string]: unknown }) => ({ ...l, purchaseId: orders.find(o => o.supplierName === l.supplier.source_name)!.id })));
-    const valid = `SELECT COUNT(*) FROM json_each(?) r JOIN products w ON w.id=json_extract(r.value,'$.warehouseProductId') JOIN products s ON s.id=json_extract(r.value,'$.supplierProductId')
+    const valid = `SELECT COUNT(*) FROM json_each(?) r JOIN products w ON w.id=json_extract(r.value,'$.warehouseProductId') JOIN products s ON s.id=json_extract(r.value,'$.supplierProductId') JOIN imports si ON si.id=s.import_id
       WHERE w.import_id=json_extract(r.value,'$.target.import_id') AND s.import_id=json_extract(r.value,'$.supplier.import_id') AND w.import_id IN (${active}) AND s.import_id IN (${active})
+      AND ${supplierVisible("si")} AND si.source_name=json_extract(r.value,'$.supplier.source_name')
       AND w.code=json_extract(r.value,'$.target.code') AND w.brand=json_extract(r.value,'$.target.brand') AND s.code=json_extract(r.value,'$.supplier.code') AND s.brand=json_extract(r.value,'$.supplier.brand')
       AND w.stock=json_extract(r.value,'$.target.stock') AND w.min_stock=json_extract(r.value,'$.target.min_stock') AND ${incoming("w")}=json_extract(r.value,'$.target.incoming_qty')
       AND s.price_cents=json_extract(r.value,'$.supplier.price_cents') AND s.stock IS json_extract(r.value,'$.supplier.stock') AND ${plannedSupply("s")}=json_extract(r.value,'$.supplier.planned_qty')`;

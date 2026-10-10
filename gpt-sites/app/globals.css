@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "../vendor/shadcn-tailwind-4.13.0.css";
 @import "./inventory-extra.css";
+@import "./suppliers.css";
 @import "./labels/labels.css";
 :root{--background:#f5f7fa;--foreground:#172d45;--primary:#1264bd;--border:#e3e9f0;--muted-foreground:#748295;--radius:.6rem}
 @theme inline{--color-background:var(--background);--color-foreground:var(--foreground);--color-primary:var(--primary);--color-border:var(--border);--color-muted-foreground:var(--muted-foreground);--font-sans:Arial,Helvetica,sans-serif}

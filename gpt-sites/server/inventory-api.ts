@@ -10,8 +10,11 @@ import { orderSettings, saveOrderSettings, type OrderSettingsEnv } from "./shop-
 import { productPhotoApi, photoProjection } from "./product-photos";
 import { photoUrl } from "../lib/product-photos";
 
+import { previewRosskoConnection, availableRossko, searchRosskoSupplier, deliveryRosskoSupplier, bootstrapRossko, secretBody } from "./rossko-connections";
+import type { RosskoEnv } from "./rossko";
+
 type Identity = { userId: string; email: string; displayName: string };
-type Bindings = { DB?: D1Database; BUCKET?: R2Bucket } & IntegrationEnv & OrderSettingsEnv;
+type Bindings = { DB?: D1Database; BUCKET?: R2Bucket } & IntegrationEnv & OrderSettingsEnv & RosskoEnv;
 type Customer = { id: string; auth_user_id: string | null; email: string; name: string; role: string; discount_bps: number; markup_bps: number; created_at: string };
 type Product = { id: string; import_id: string; code: string; brand: string; name: string; stock: number | null; price_cents: number; source_name: string; source_type: string; lead_days: number | null; warehouse: string; bin: string; min_stock: number; photo_id?: string | null; photo_count?: number };
 type Order = { id: string; customer_id: string; idempotency_key: string; total_cents: number; status: string; comment: string; created_at: string; customer_name?: string; customer_email?: string };
@@ -77,12 +80,27 @@ export async function inventoryApi(request: Request, env: Bindings, user: Identi
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) throw new InputError("Запрос должен исходить с этого сайта.", 403);
     }
+    if (path === "/api/integrations/rossko/bootstrap" && method === "POST") return json(await bootstrapRossko(request, db, env));
     const me = user ? await currentCustomer(db, user) : null;
     if (/^\/api\/products\/[^/]+\/photos(?:\/[^/]+)?$/.test(path) || path.startsWith("/api/product-photos/")) {
       return await productPhotoApi(request, db, env.BUCKET, me?.role === "admin");
     }
+    if (path === "/api/suppliers/rossko/check" && method === "POST") {
+      admin(me); return json(await previewRosskoConnection(db, env, await secretBody(request)));
+    }
+    if (path === "/api/rossko/suppliers" && method === "GET") {
+      signedIn(me); const suppliers = await availableRossko(db);
+      return json({ suppliers: suppliers.map((s, i) => ({ id: s.id, name: me.role === "admin" ? s.name : "Поставщик " + (i + 1), deliveryReady: !!s.delivery_id })) });
+    }
+    if (path === "/api/rossko/delivery" && method === "POST") {
+      signedIn(me); return json(await deliveryRosskoSupplier(db, env, await secretBody(request)));
+    }
+    if (path === "/api/rossko/search" && method === "POST") {
+      signedIn(me); const result = await searchRosskoSupplier(db, env, await secretBody(request));
+      return json({ ...result, supplierName: me.role === "admin" ? result.supplierName : "Поставщик", offers: result.offers.map(({ guid, stockId, description, ...p }, index) => ({ ...p, ...(me.role !== "admin" ? { offerId: "offer_" + index } : {}), priceCents: customerPrice(p.priceCents, me.discount_bps, me.markup_bps), ...(me.role === "admin" ? { guid, stockId, description, basePriceCents: p.priceCents } : {}) })) });
+    }
     if (path === "/api/suppliers" || path.startsWith("/api/suppliers/")) {
-      admin(me); return await supplierApi(request, db);
+      admin(me); return await supplierApi(request, db, env);
     }
     if (path === "/api/shop-settings" && (method === "GET" || method === "PATCH")) {
       admin(me); return json(method === "GET" ? await orderSettings(db, env) : await saveOrderSettings(db, await readBody(request)));

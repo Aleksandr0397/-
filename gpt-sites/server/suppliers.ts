@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { InputError, normalize } from "../lib/inventory-domain";
 import { supplierInputSchema, supplierInput, type Supplier } from "../lib/suppliers";
+import { connectionRow, connectionView, prepareRosskoConnection, connectionStatement } from "./rossko-connections";
+import type { RosskoEnv } from "./rossko";
 const active = "SELECT value FROM settings WHERE key LIKE 'active_import:%'";
 export const supplierVisible = (alias = "i") => `(${alias}.supplier_id IS NULL OR EXISTS (SELECT 1 FROM suppliers sv WHERE sv.id=${alias}.supplier_id AND sv.enabled=1))`;
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
@@ -31,12 +33,16 @@ export async function supplierForPrice(db: D1Database, supplierId: unknown, lega
   if (supplier.connection_type === "api") throw new InputError("Для этого поставщика выбран только API. Для загрузки файла выберите «Прайс» или «Прайс и API».", 409);
   return supplier;
 }
-export async function supplierApi(request: Request, db: D1Database) {
+export async function supplierApi(request: Request, db: D1Database, env: RosskoEnv = {}) {
   const path = new URL(request.url).pathname.replace(/\/$/, "");
   if (path === "/api/suppliers" && request.method === "GET") {
     await linkLegacySuppliers(db);
-    const rows = (await db.prepare(`SELECT s.*,(SELECT COUNT(*) FROM products p JOIN imports i ON i.id=p.import_id WHERE i.supplier_id=s.id AND i.id IN (${active})) AS product_count,(SELECT MAX(created_at) FROM imports WHERE supplier_id=s.id) AS last_import_at FROM suppliers s ORDER BY s.enabled DESC,s.name COLLATE NOCASE`).all<Supplier>()).results;
-    return json({ suppliers: rows.map(s => ({ ...s, apiConnected: false })) });
+    const rows = (await db.prepare(`SELECT s.*,c.keys_cipher,c.delivery_id,c.address_id,c.options_json,c.verified_at,c.supplier_id AS connection_supplier_id,(SELECT COUNT(*) FROM products p JOIN imports i ON i.id=p.import_id WHERE i.supplier_id=s.id AND i.id IN (${active})) AS product_count,(SELECT MAX(created_at) FROM imports WHERE supplier_id=s.id) AS last_import_at FROM suppliers s LEFT JOIN supplier_connections c ON c.supplier_id=s.id ORDER BY s.enabled DESC,s.name COLLATE NOCASE`).all<Supplier & { keys_cipher: string | null; delivery_id: string; address_id: number | null; options_json: string; verified_at: string | null; connection_supplier_id: string | null }>()).results;
+    return json({ suppliers: rows.map(row => {
+      const { keys_cipher, delivery_id, address_id, options_json, verified_at, connection_supplier_id, ...s } = row;
+      const rossko = connectionView(connection_supplier_id ? { supplier_id: s.id, keys_cipher: keys_cipher!, delivery_id, address_id, options_json, verified_at, revision: 1, last_request_at: 0 } : null);
+      return { ...s, apiConnected: s.api_provider === "rossko" && s.connection_type !== "price" && !!s.enabled && !!rossko.verifiedAt && !!rossko.deliveryId, ...(s.api_provider === "rossko" ? { rossko } : {}) };
+    }) });
   }
   if (request.method !== "POST" && request.method !== "PATCH") throw new InputError("Поставщик не найден.", 404);
   if (request.method === "POST" && path !== "/api/suppliers" || request.method === "PATCH" && !/^\/api\/suppliers\/[^/]+$/.test(path)) throw new InputError("Поставщик не найден.", 404);
@@ -51,15 +57,18 @@ export async function supplierApi(request: Request, db: D1Database) {
   if (!parsed.success) throw new InputError("Проверьте карточку: " + parsed.error.issues[0].message);
   const data = parsed.data, nameKey = normalize(data.name), timestamp = new Date().toISOString();
   if (!nameKey) throw new InputError("Укажите название поставщика.");
-  const values = [data.name, nameKey, data.connectionType, data.leadDays, data.contactName, data.phone, data.email.toLowerCase(), data.website, data.apiUrl, data.apiDocsUrl, data.notes, data.enabled ? 1 : 0];
+  if (existing && input.expectedRevision !== existing.revision) throw new InputError("Карточка уже изменена. Обновите список и повторите сохранение.", 409);
+  const connection = data.apiProvider === "rossko" && (input.rossko !== undefined || existing?.api_provider !== "rossko") ? await prepareRosskoConnection(db, env, supplierId, input.rossko) : null;
+  const values = [data.name, nameKey, data.apiProvider, data.connectionType, data.leadDays, data.contactName, data.phone, data.email.toLowerCase(), data.website, data.apiUrl, data.apiDocsUrl, data.notes, data.enabled ? 1 : 0];
   try {
     if (request.method === "POST") {
-      await db.prepare("INSERT INTO suppliers (id,name,name_key,connection_type,lead_days,contact_name,phone,email,website,api_url,api_docs_url,notes,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(supplierId, ...values, timestamp, timestamp).run();
+      await db.batch([db.prepare("INSERT INTO suppliers (id,name,name_key,api_provider,connection_type,lead_days,contact_name,phone,email,website,api_url,api_docs_url,notes,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(supplierId, ...values, timestamp, timestamp), ...(connection ? [connectionStatement(db, supplierId, connection)] : [])]);
     } else {
       const revision = z.number().int().positive().safeParse(input.expectedRevision);
       if (!revision.success) throw new InputError("Обновите карточку поставщика перед сохранением.", 409);
       const result = await db.batch([
-        db.prepare("UPDATE suppliers SET name=?,name_key=?,connection_type=?,lead_days=?,contact_name=?,phone=?,email=?,website=?,api_url=?,api_docs_url=?,notes=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?").bind(...values, timestamp, supplierId, revision.data),
+        db.prepare("UPDATE suppliers SET name=?,name_key=?,api_provider=?,connection_type=?,lead_days=?,contact_name=?,phone=?,email=?,website=?,api_url=?,api_docs_url=?,notes=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?").bind(...values, timestamp, supplierId, revision.data),
+        ...(connection ? [connectionStatement(db, supplierId, connection)] : []),
         db.prepare("UPDATE imports SET source_name=(SELECT name FROM suppliers WHERE id=?) WHERE supplier_id=?").bind(supplierId, supplierId),
       ]);
       if (!result[0].meta.changes) throw new InputError("Карточка уже изменена или поставщик не найден. Обновите список и повторите сохранение.", 409);
@@ -70,5 +79,6 @@ export async function supplierApi(request: Request, db: D1Database) {
     throw error;
   }
   const supplier = await db.prepare("SELECT * FROM suppliers WHERE id=?").bind(supplierId).first<Supplier>();
-  return json({ supplier: { ...supplier, apiConnected: false } }, request.method === "POST" ? 201 : 200);
+  const rossko = connectionView(await connectionRow(db, supplierId));
+  return json({ supplier: { ...supplier, apiConnected: supplier?.api_provider === "rossko" && supplier.connection_type !== "price" && !!supplier.enabled && !!rossko.verifiedAt && !!rossko.deliveryId, ...(supplier?.api_provider === "rossko" ? { rossko } : {}) } }, request.method === "POST" ? 201 : 200);
 }

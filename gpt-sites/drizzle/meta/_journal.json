@@ -43,6 +43,13 @@
       "when": 1791647071867,
       "tag": "0005_nervous_juggernaut",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1791659494895,
+      "tag": "0006_abandoned_midnight",
+      "breakpoints": true
     }
   ]
 }

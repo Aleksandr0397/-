@@ -9,12 +9,19 @@ export const customers = sqliteTable("customers", {
 }, () => [check("discount_range", sql.raw("discount_bps >= 0 AND discount_bps <= 8000")), check("markup_range", sql.raw("markup_bps >= 0 AND markup_bps <= 100000"))]);
 export const suppliers = sqliteTable("suppliers", {
   id: text("id").primaryKey(), name: text("name").notNull(), nameKey: text("name_key").notNull().unique(),
-  connectionType: text("connection_type").notNull().default("price"), leadDays: integer("lead_days").notNull().default(0),
+  apiProvider: text("api_provider").notNull().default(""), connectionType: text("connection_type").notNull().default("price"), leadDays: integer("lead_days").notNull().default(0),
   contactName: text("contact_name").notNull().default(""), phone: text("phone").notNull().default(""), email: text("email").notNull().default(""),
   website: text("website").notNull().default(""), apiUrl: text("api_url").notNull().default(""), apiDocsUrl: text("api_docs_url").notNull().default(""),
   notes: text("notes").notNull().default(""), enabled: integer("enabled").notNull().default(1), revision: integer("revision").notNull().default(1),
   createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
 }, () => [check("supplier_connection_type", sql.raw("connection_type IN ('price','api','both')")), check("supplier_enabled", sql.raw("enabled IN (0,1)")), check("supplier_lead_days", sql.raw("lead_days >= 0 AND lead_days <= 365")), check("supplier_revision", sql.raw("revision > 0"))]);
+// Credentials deliberately stay outside portable data backups.
+export const supplierConnections = sqliteTable("supplier_connections", {
+  supplierId: text("supplier_id").primaryKey().references(() => suppliers.id),
+  keysCipher: text("keys_cipher").notNull(), deliveryId: text("delivery_id").notNull().default(""),
+  addressId: integer("address_id"), optionsJson: text("options_json").notNull(), verifiedAt: text("verified_at"),
+  revision: integer("revision").notNull().default(1), lastRequestAt: integer("last_request_at").notNull().default(0),
+});
 export const imports = sqliteTable("imports", {
   id: text("id").primaryKey(), filename: text("filename").notNull(), fileKey: text("file_key"),
   rowCount: integer("row_count").notNull().default(0), createdAt: text("created_at").notNull(),

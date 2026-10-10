@@ -125,7 +125,7 @@ export async function restoreBackup(db: D1Database, bucket: R2Bucket, form: Form
   }
   if (ownerMatch) statements.push(db.prepare("UPDATE customers SET discount_bps=?,markup_bps=? WHERE id=?").bind(ownerMatch.discount_bps, ownerMatch.markup_bps, owner.id));
   addRows("customers", ["id", "email", "name", "role", "discount_bps", "markup_bps", "created_at"], data.customers.filter(row => row.id !== ownerMatch?.id).map(row => ({ ...row, id: customerId(row.id), email: row.email.toLowerCase(), role: "customer" })));
-  addRows("suppliers", ["id", "name", "name_key", "connection_type", "lead_days", "contact_name", "phone", "email", "website", "api_url", "api_docs_url", "notes", "enabled", "revision", "created_at", "updated_at"], data.suppliers);
+  addRows("suppliers", ["id", "name", "name_key", "api_provider", "connection_type", "lead_days", "contact_name", "phone", "email", "website", "api_url", "api_docs_url", "notes", "enabled", "revision", "created_at", "updated_at"], data.suppliers);
   addRows("imports", ["id", "filename", "file_key", "row_count", "created_at", "source_name", "source_type", "lead_days", "supplier_id"], importRows);
   addRows("products", ["id", "import_id", "code", "brand", "name", "search_text", "stock", "price_cents", "warehouse", "bin", "min_stock"], data.products);
   addRows("product_photos", ["id", "product_id", "file_key", "filename", "content_type", "size_bytes", "width", "height", "position", "created_at"], photoRows);

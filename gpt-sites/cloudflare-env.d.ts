@@ -1,5 +1,8 @@
 declare namespace Cloudflare {
   interface Env {
+    SUPPLIER_CREDENTIALS_KEY?: string;
+    ROSSKO_KEY1?: string;
+    ROSSKO_KEY2?: string;
     DB?: D1Database;
     BUCKET?: R2Bucket;
     RESEND_API_KEY?: string;

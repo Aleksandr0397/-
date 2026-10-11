@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { InputError, normalize } from "../lib/inventory-domain";
-import { rosskoDeliveryLabel, rosskoDeliveryMethod, rosskoDeliveryWarning, type RosskoConnection, type RosskoOptions } from "../lib/rossko";
+import { rosskoDeliveryLabel, rosskoDeliveryAddressId, rosskoDeliveryMethod, rosskoDeliveryWarning, rosskoAddressWarning, type RosskoConnection, type RosskoOptions } from "../lib/rossko";
 import { rosskoDetails, rosskoSearch, rosskoDelivery, openKeys, sealKeys, type RosskoEnv, type RosskoKeys } from "./rossko";
 export type ConnectionRow = { supplier_id: string; keys_cipher: string; delivery_id: string; address_id: number | null; options_json: string; verified_at: string | null; revision: number; last_request_at: number };
 const key = z.string().trim().refine(s => !s || /^[a-f0-9]{32}$/i.test(s), "Ключ должен содержать 32 шестнадцатеричных символа.");
@@ -15,7 +15,7 @@ export async function connectionRow(db: D1Database, id: string) { return db.prep
 export function connectionView(row: ConnectionRow | null): RosskoConnection {
   const options = row ? fixedRosskoDelivery(JSON.parse(row.options_json)) : { deliveries: [], addresses: [] };
   const selected = options.deliveries.find(d => d.id === row?.delivery_id);
-  return { deliveryReady: !!selected, deliveryWarning: row && !selected ? rosskoDeliveryWarning : null, key1Saved: !!row?.keys_cipher, key2Saved: !!row?.keys_cipher, verifiedAt: row?.verified_at ?? null, deliveryId: selected?.id ?? "", addressId: null, options };
+  return { deliveryReady: !!selected, deliveryWarning: row && !selected ? rosskoDeliveryWarning : null, key1Saved: !!row?.keys_cipher, key2Saved: !!row?.keys_cipher, verifiedAt: row?.verified_at ?? null, deliveryId: selected?.id ?? "", addressId: options.addresses[0]?.id ?? null, options };
 }
 async function keysFor(env: RosskoEnv, id: string, row: ConnectionRow | null, input: ReturnType<typeof parseInput>): Promise<RosskoKeys> {
   const old = row && (!input.key1 || !input.key2) ? await openKeys(env, id, row.keys_cipher) : null;
@@ -24,17 +24,30 @@ async function keysFor(env: RosskoEnv, id: string, row: ConnectionRow | null, in
 }
 const canonical = (s: string) => s.normalize("NFKC").toLocaleLowerCase("ru").replace(/а/g, "a").replace(/[^а-яёa-z0-9]/g, "");
 export function fixedRosskoDelivery(options: RosskoOptions): RosskoOptions {
-  // The address is displayed on the Site only. Neither connection selection
-  // nor supplier API requests depend on an address or its delivery mapping.
+  // Use only the address actually returned for this account. A missing
+  // Delivery mapping does not prevent the owner's requested courier attempt.
   const couriers = options.deliveries.filter(d => !/самовывоз/i.test(d.name) && /курьер/i.test(d.name));
   const selected = couriers.find(d => canonical(d.name) === canonical(rosskoDeliveryMethod)) ?? (couriers.length === 1 ? couriers[0] : null);
-  return { deliveries: selected ? [selected] : [], addresses: [] };
+  return { deliveries: selected ? [selected] : [], addresses: options.addresses.filter(a => a.id === rosskoDeliveryAddressId).slice(0, 1) };
 }
 function delivery(options: RosskoOptions, deliveryId?: string) {
   const fixed = fixedRosskoDelivery(options), d = fixed.deliveries[0];
   if (!d) throw new InputError(rosskoDeliveryWarning, 409);
   if (deliveryId && deliveryId !== d.id) throw new InputError("Для ROSSKO выбрана только «Курьерская доставка».", 409);
-  return { deliveryId: d.id, addressId: null };
+  return { deliveryId: d.id, addressId: fixed.addresses[0]?.id ?? null };
+}
+async function cabinetDelivery(db: D1Database, supplier: { id: string; revision: number }, row: ConnectionRow, keys: RosskoKeys) {
+  let options = fixedRosskoDelivery(JSON.parse(row.options_json)), selected = delivery(options, row.delivery_id);
+  if (selected.addressId && row.address_id === selected.addressId) return { ...selected, addressId: selected.addressId };
+  // Connections saved without an address are refreshed on their first query.
+  // Persist only routing data; never rewrite keys or a concurrent supplier edit.
+  options = fixedRosskoDelivery(await rosskoDetails(keys)); selected = delivery(options, row.delivery_id);
+  if (!selected.addressId) throw new InputError(rosskoAddressWarning, 409);
+  const verifiedAt = new Date().toISOString(), optionsJson = JSON.stringify(options);
+  const result = await db.prepare("UPDATE supplier_connections SET address_id=?,options_json=?,verified_at=?,revision=revision+1 WHERE supplier_id=? AND revision=? AND EXISTS(SELECT 1 FROM suppliers s WHERE s.id=supplier_connections.supplier_id AND s.revision=? AND s.enabled=1 AND s.api_provider='rossko' AND s.connection_type IN ('api','both'))").bind(selected.addressId, optionsJson, verifiedAt, supplier.id, row.revision, supplier.revision).run();
+  if (!result.meta.changes) throw new InputError("Настройки поставщика изменились. Повторите запрос.", 409);
+  row.address_id = selected.addressId; row.options_json = optionsJson; row.verified_at = verifiedAt; row.revision++;
+  return { ...selected, addressId: selected.addressId };
 }
 export async function previewRosskoConnection(db: D1Database, env: RosskoEnv, input: unknown) {
   const data = input as { supplierId?: unknown; rossko?: unknown };
@@ -52,7 +65,7 @@ export async function previewRosskoConnection(db: D1Database, env: RosskoEnv, in
 export async function prepareRosskoConnection(db: D1Database, env: RosskoEnv, id: string, raw: unknown) {
   const input = parseInput(raw), row = await connectionRow(db, id), keys = await keysFor(env, id, row, input);
   const stored: RosskoOptions | null = row ? JSON.parse(row.options_json) : null;
-  const changed = !row || !!input.key1 || !!input.key2 || !row.verified_at || !stored?.deliveries.some(d => d.id === row.delivery_id && /курьер/i.test(d.name) && !/самовывоз/i.test(d.name)) || !!input.deliveryId && input.deliveryId !== row.delivery_id;
+  const changed = !row || !!input.key1 || !!input.key2 || !row.verified_at || row.address_id !== rosskoDeliveryAddressId || !stored?.addresses.some(a => a.id === rosskoDeliveryAddressId) || !stored?.deliveries.some(d => d.id === row.delivery_id && /курьер/i.test(d.name) && !/самовывоз/i.test(d.name)) || !!input.deliveryId && input.deliveryId !== row.delivery_id;
   const options: RosskoOptions = fixedRosskoDelivery(changed ? await rosskoDetails(keys) : stored!);
   const selected = options.deliveries.length ? delivery(options, input.deliveryId) : { deliveryId: "", addressId: null };
   return { cipher: changed ? await sealKeys(env, id, keys) : row.keys_cipher, options: JSON.stringify(options), verifiedAt: changed ? new Date().toISOString() : row.verified_at!, ...selected };
@@ -73,11 +86,11 @@ export async function searchRosskoSupplier(db: D1Database, env: RosskoEnv, input
   const row = supplier ? await connectionRow(db, supplier.id) : null;
   if (!supplier?.enabled || supplier.connection_type === "price" || supplier.api_provider !== "rossko" || !row?.verified_at) throw new InputError("Подключение ROSSKO недоступно. Проверьте карточку поставщика.", 409);
   if (!row.delivery_id) throw new InputError(rosskoDeliveryWarning, 409);
-  const keys = await openKeys(env, supplier.id, row.keys_cipher), options: RosskoOptions = JSON.parse(row.options_json);
-  const selected = delivery(options, row.delivery_id), time = Date.now();
+  const keys = await openKeys(env, supplier.id, row.keys_cipher), time = Date.now();
   const acquired = await db.prepare("UPDATE supplier_connections SET last_request_at=? WHERE supplier_id=? AND revision=? AND last_request_at<=?").bind(time, supplier.id, row.revision, time - 3000).run();
   if (!acquired.meta.changes) throw new InputError("Подождите 3 секунды перед следующим запросом ROSSKO.", 429);
-  const offers = await rosskoSearch(keys, { query: p.data.query, deliveryId: selected.deliveryId });
+  const selected = await cabinetDelivery(db, supplier, row, keys);
+  const offers = await rosskoSearch(keys, { query: p.data.query, ...selected });
   const current = await db.prepare("SELECT s.revision AS supplier_revision,c.revision AS connection_revision,s.enabled,s.api_provider,s.connection_type FROM suppliers s JOIN supplier_connections c ON c.supplier_id=s.id WHERE s.id=?").bind(supplier.id).first<{ supplier_revision: number; connection_revision: number; enabled: number; api_provider: string; connection_type: string }>();
   if (!current?.enabled || current.api_provider !== "rossko" || current.connection_type === "price" || current.supplier_revision !== supplier.revision || current.connection_revision !== row.revision) throw new InputError("Настройки поставщика изменились. Повторите поиск.", 409);
   return { offers, supplierName: supplier.name, checkedAt: new Date().toISOString(), query: p.data.query };
@@ -88,10 +101,11 @@ export async function deliveryRosskoSupplier(db: D1Database, env: RosskoEnv, inp
   const supplier = await db.prepare("SELECT id,revision FROM suppliers WHERE id=? AND enabled=1 AND connection_type IN ('api','both') AND api_provider='rossko'").bind(p.data.supplierId).first<{ id: string; revision: number }>();
   const row = supplier ? await connectionRow(db, supplier.id) : null;
   if (!supplier || !row?.verified_at) throw new InputError("Подключение ROSSKO недоступно.", 409);
-  const selected = delivery(JSON.parse(row.options_json), row.delivery_id), time = Date.now();
+  const time = Date.now();
   const acquired = await db.prepare("UPDATE supplier_connections SET last_request_at=? WHERE supplier_id=? AND revision=? AND last_request_at<=?").bind(time, supplier.id, row.revision, time - 3000).run();
   if (!acquired.meta.changes) throw new InputError("Подождите 3 секунды перед следующим запросом ROSSKO.", 429);
-  const waves = await rosskoDelivery(await openKeys(env, supplier.id, row.keys_cipher), p.data.date, selected.deliveryId);
+  const keys = await openKeys(env, supplier.id, row.keys_cipher), selected = await cabinetDelivery(db, supplier, row, keys);
+  const waves = await rosskoDelivery(keys, p.data.date, selected.deliveryId, selected.addressId);
   const current = await db.prepare("SELECT s.revision AS supplier_revision,c.revision AS connection_revision FROM suppliers s JOIN supplier_connections c ON c.supplier_id=s.id WHERE s.id=? AND s.enabled=1 AND s.connection_type IN ('api','both') AND s.api_provider='rossko'").bind(supplier.id).first<{ supplier_revision: number; connection_revision: number }>();
   if (!current || current.supplier_revision !== supplier.revision || current.connection_revision !== row.revision) throw new InputError("Настройки поставщика изменились. Повторите запрос.", 409);
   return { waves, date: p.data.date, address: rosskoDeliveryLabel, checkedAt: new Date().toISOString() };

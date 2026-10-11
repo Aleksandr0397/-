@@ -32,9 +32,9 @@ function parse(xml: string, method: string): Node {
   if (!response || ![ns, "http://api.rossko.ru/"].includes(response.namespace) || !result) throw invalid();
   if (!["true", "1"].includes(value(result, "success").toLowerCase())) {
     const message = value(result, "message").toLowerCase();
-    if (/адрес.*(?:не указан|не найден|обязател|укажите)|(?:укажите|не указан).*адрес|address.*(?:required|missing|not (?:specified|found))/.test(message)) throw new InputError("ROSSKO требует адрес доставки для этого запроса. Адрес не передаётся по выбранной настройке, поэтому цены и сроки пока недоступны.", 409);
-    if (method === "GetSearch" && /nothing found|no (?:results|parts)|ничего не найдено|не найден/.test(message)) return { ...result, children: [] };
+    if (/адрес.*(?:не указан|не найден|обязател|укажите)|(?:укажите|не указан).*адрес|address.*(?:required|missing|not (?:specified|found))/.test(message)) throw new InputError("ROSSKO не принял адрес доставки из личного кабинета. Проверьте адрес и его настройки в ROSSKO.", 409);
     if (/не осуществляется доставка|не поддерживается доставка/.test(message)) throw new InputError("ROSSKO не разрешил выбранную доставку на ваш адрес. Уточните настройки доставки у менеджера ROSSKO.", 409);
+    if (method === "GetSearch" && /nothing found|no (?:results|parts)|ничего не найдено|не найден/.test(message)) return { ...result, children: [] };
     if (/limit|лимит|too many/.test(message)) throw new InputError("Достигнут лимит запросов ROSSKO. Повторите поиск позже.", 429);
     throw new InputError("ROSSKO не подтвердил запрос. Проверьте оба ключа, настройки доставки и доступ к API.", 502);
   }
@@ -70,8 +70,8 @@ export async function rosskoDetails(keys: RosskoKeys, transport: typeof fetch = 
 }
 function integer(input: string, min: number, max: number): number | null { if (!/^\d+$/.test(input)) return null; const n = Number(input); return Number.isSafeInteger(n) && n >= min && n <= max ? n : null; }
 function cents(input: string): number | null { const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(input); if (!m) return null; const n = Number(m[1]) * 100 + Number((m[2] ?? "").padEnd(2, "0")); return Number.isSafeInteger(n) && n > 0 && n <= 1_000_000_000 ? n : null; }
-export async function rosskoSearch(keys: RosskoKeys, query: { query: string; deliveryId: string }, transport: typeof fetch = fetch): Promise<RosskoOffer[]> {
-  const result = await call("GetSearch", keys, { text: query.query, delivery_id: query.deliveryId }, transport);
+export async function rosskoSearch(keys: RosskoKeys, query: { query: string; deliveryId: string; addressId: number }, transport: typeof fetch = fetch): Promise<RosskoOffer[]> {
+  const result = await call("GetSearch", keys, { text: query.query, delivery_id: query.deliveryId, address_id: String(query.addressId) }, transport);
   const offers: RosskoOffer[] = [], ids = new Set<string>();
   function visit(part: Node, analogue: boolean, depth = 0) {
     if (depth > 2 || offers.length >= 1000) return;
@@ -93,8 +93,8 @@ function apiDate(input: string): string | null {
   const calendar = new Date(input.slice(0, 10) + "T12:00:00Z");
   return calendar.toISOString().slice(0, 10) === input.slice(0, 10) ? input : null;
 }
-export async function rosskoDelivery(keys: RosskoKeys, date: string, deliveryId: string, transport: typeof fetch = fetch): Promise<RosskoWave[]> {
-  const result = await call("GetDeliveryDetails", keys, { date }, transport), waves: RosskoWave[] = [];
+export async function rosskoDelivery(keys: RosskoKeys, date: string, deliveryId: string, addressId: number, transport: typeof fetch = fetch): Promise<RosskoWave[]> {
+  const result = await call("GetDeliveryDetails", keys, { date, address_id: String(addressId) }, transport), waves: RosskoWave[] = [];
   for (const d of children(child(result, "Deliveries"), "Delivery")) {
     if (value(d, "id") !== deliveryId) continue;
     for (const w of children(d, "Wave").slice(0, 100)) {

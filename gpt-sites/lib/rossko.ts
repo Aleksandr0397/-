@@ -4,6 +4,8 @@ export type RosskoOffer = { offerId: string; guid?: string; stockId?: string; co
 export type RosskoInput = { key1?: string; key2?: string; deliveryId?: string; addressId?: number | null };
 
 export const rosskoDeliveryLabel = "Новониколаевский, ул. Октябрьская, 81А";
+// ID returned by this account's GetCheckoutDetails, not a postal address string.
+export const rosskoDeliveryAddressId = 83270;
 export const rosskoDeliveryMethod = "Курьерская доставка";
 export type RosskoWave = { deliveryStart: string; deliveryEnd: string; timeLimit: string };
 // ROSSKO sends local calendar dates/times, often without a timezone. Preserve
@@ -16,3 +18,4 @@ export function rosskoDateTime(value: string, time = false) {
 }
 
 export const rosskoDeliveryWarning = "ROSSKO не вернул способ «Курьерская доставка». Проверьте подключение повторно.";
+export const rosskoAddressWarning = "ROSSKO не вернул сохранённый адрес доставки: Новониколаевский, Октябрьская улица, 81, А. Проверьте адрес в личном кабинете ROSSKO.";

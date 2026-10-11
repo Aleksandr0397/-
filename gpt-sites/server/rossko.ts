@@ -70,8 +70,8 @@ export async function rosskoDetails(keys: RosskoKeys, transport: typeof fetch = 
 }
 function integer(input: string, min: number, max: number): number | null { if (!/^\d+$/.test(input)) return null; const n = Number(input); return Number.isSafeInteger(n) && n >= min && n <= max ? n : null; }
 function cents(input: string): number | null { const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(input); if (!m) return null; const n = Number(m[1]) * 100 + Number((m[2] ?? "").padEnd(2, "0")); return Number.isSafeInteger(n) && n > 0 && n <= 1_000_000_000 ? n : null; }
-export async function rosskoSearch(keys: RosskoKeys, query: { query: string; deliveryId: string; addressId: number }, transport: typeof fetch = fetch): Promise<RosskoOffer[]> {
-  const result = await call("GetSearch", keys, { text: query.query, delivery_id: query.deliveryId, address_id: String(query.addressId) }, transport);
+export async function rosskoSearch(keys: RosskoKeys, query: { query: string; deliveryId: string; addressId: number | null }, transport: typeof fetch = fetch): Promise<RosskoOffer[]> {
+  const result = await call("GetSearch", keys, { text: query.query, delivery_id: query.deliveryId, ...(query.addressId === null ? {} : { address_id: String(query.addressId) }) }, transport);
   const offers: RosskoOffer[] = [], ids = new Set<string>();
   function visit(part: Node, analogue: boolean, depth = 0) {
     if (depth > 2 || offers.length >= 1000) return;

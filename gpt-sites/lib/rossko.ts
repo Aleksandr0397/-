@@ -7,6 +7,9 @@ export const rosskoDeliveryLabel = "Новониколаевский, ул. Ок
 // ID returned by this account's GetCheckoutDetails, not a postal address string.
 export const rosskoDeliveryAddressId = 83270;
 export const rosskoDeliveryMethod = "Курьерская доставка";
+export const rosskoSearchDeliveryId = "000000001";
+export const rosskoSearchMethod = "Самовывоз Волгоград Михайловка";
+export const rosskoWarehouseNotice = "Сроки относятся к поступлению на склад ROSSKO в Михайловке. Курьерская доставка магазина согласуется отдельно.";
 export type RosskoWave = { deliveryStart: string; deliveryEnd: string; timeLimit: string };
 // ROSSKO sends local calendar dates/times, often without a timezone. Preserve
 // their calendar values instead of letting the viewer's timezone move a date.
@@ -17,5 +20,5 @@ export function rosskoDateTime(value: string, time = false) {
   return date + (time ? ", " + match[4] + ":" + match[5] : "");
 }
 
-export const rosskoDeliveryWarning = "ROSSKO не вернул способ «Курьерская доставка». Проверьте подключение повторно.";
+export const rosskoDeliveryWarning = "ROSSKO не вернул доступ к складу Михайловки для поиска. Проверьте подключение повторно.";
 export const rosskoAddressWarning = "ROSSKO не вернул сохранённый адрес доставки: Новониколаевский, Октябрьская улица, 81, А. Проверьте адрес в личном кабинете ROSSKO.";
